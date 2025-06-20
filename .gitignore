@@ -1,0 +1,27 @@
+# Oracle specific
+*.log
+*.trc
+*.aud
+
+# SQL Developer
+*.jpr
+*.jws
+.data/
+
+# Temporary files
+*~
+*.tmp
+*.bak
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Build artifacts
+build/
+dist/
