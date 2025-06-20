@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/PLT_logo.jpg" alt="PLTelemetry logo" width="200"/>
+</p>
+
 # PLTelemetry
 
 OpenTelemetry SDK for Oracle PL/SQL - Distributed tracing, metrics, and observability for Oracle Database applications.
