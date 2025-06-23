@@ -1,27 +1,74 @@
-# Oracle specific
+# Oracle
 *.log
 *.trc
+*.trm
 *.aud
-
-# SQL Developer
-*.jpr
-*.jws
-.data/
-
-# Temporary files
-*~
-*.tmp
-*.bak
-
-# OS specific
-.DS_Store
-Thumbs.db
+*.dmp
 
 # IDE
-.vscode/
 .idea/
-*.sublime-*
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
 
-# Build artifacts
-build/
-dist/
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific
+/temp/
+/build/
+/dist/
+*.bak
+*.tmp
+*.old
+
+# Bundle files
+pltelemetry-complete-bundle*.*
+pltelemetry-bundle*.*
+*-bundle.txt
+*-bundle.txt.gz
+
+# Test outputs
+test-results/
+*.test.log
+
+# Credentials (never commit these!)
+*credentials*
+*password*
+*.key
+*.pem
+config.local.*
+
+# Node.js (for future bridges)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Python (for future bridges)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+
+# Documentation builds
+docs/_build/
+docs/_site/
+*.pdf
+
+# Temporary SQL files
+*.sql.tmp
+*.sql.bak
+spool*.txt
