@@ -156,4 +156,13 @@ CREATE TABLE plt_telemetry_errors (
 COMMENT ON TABLE plt_telemetry_errors IS 'Internal error logging for PLTelemetry operations';
 COMMENT ON COLUMN plt_telemetry_errors.module_name IS 'PLTelemetry module where error occurred';
 
-PROMPT PLTelemetry tables created successfully.
+CREATE TABLE plt_logs (
+    log_id       NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    trace_id     VARCHAR2(32),
+    span_id      VARCHAR2(16),
+    log_level    VARCHAR2(10) NOT NULL,
+    message      VARCHAR2(4000) NOT NULL,
+    timestamp    TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    attributes   VARCHAR2(4000) DEFAULT '{}',
+    created_at   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
+);

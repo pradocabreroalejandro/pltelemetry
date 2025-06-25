@@ -1,5 +1,22 @@
 CREATE OR REPLACE PACKAGE BODY PLTelemetry
 AS
+
+    /**
+     * PLTelemetry - OpenTelemetry SDK for PL/SQL
+     * 
+     * This package provides a generic, backend-agnostic implementation of
+     * distributed tracing for Oracle PL/SQL applications following OpenTelemetry standards.
+     * 
+     * JSON Format:
+     * - Traces: {"trace_id", "operation", "start_time", "service_name"}
+     * - Spans: {"trace_id", "span_id", "operation", "start_time", "end_time", "duration_ms", "status", "attributes"}
+     * - Metrics: {"name", "value", "unit", "timestamp", "trace_id", "span_id", "attributes"}
+     * 
+     * Backend Integration:
+     * The package sends JSON payloads to g_backend_url. Implement your own
+     * backend adapter to transform this generic format to your specific needs.
+     */
+
    --------------------------------------------------------------------------
    -- PRIVATE HELPER FUNCTIONS
    --------------------------------------------------------------------------
@@ -71,169 +88,241 @@ AS
     * @param p_json JSON payload to send to backend
     * @private
     */
-   PROCEDURE send_to_backend_sync (p_json VARCHAR2)
-   IS
-       l_req          UTL_HTTP.REQ;
-       l_res          UTL_HTTP.RESP;
-       l_buffer       VARCHAR2 (32767);
-       l_length       NUMBER;
-       l_offset       NUMBER := 1;
-       l_amount       NUMBER;
-       l_error_msg    VARCHAR2 (4000);
-       l_error_code   NUMBER;
-   BEGIN
-       -- Validate input
-       IF p_json IS NULL
-       THEN
-           RETURN;
-       END IF;
+   -- MODIFICATION FOR PLTelemetry PACKAGE BODY
+-- Replace the existing send_to_backend_sync procedure with this version
 
-       -- Get length in characters
-       l_length := LENGTH (p_json);
+/**
+ * Sends telemetry data synchronously via HTTP
+ * 
+ * @param p_json JSON payload to send to backend
+ * @private
+ */
+PROCEDURE send_to_backend_sync (p_json VARCHAR2)
+IS
+    l_req          UTL_HTTP.REQ;
+    l_res          UTL_HTTP.RESP;
+    l_buffer       VARCHAR2 (32767);
+    l_length       NUMBER;
+    l_offset       NUMBER := 1;
+    l_amount       NUMBER;
+    l_error_msg    VARCHAR2 (4000);
+    l_error_code   NUMBER;
+    l_response_body  VARCHAR2(4000) := '';
+    l_chunk          VARCHAR2(32767);
+BEGIN
+    -- Validate input
+    IF p_json IS NULL
+    THEN
+        RETURN;
+    END IF;
 
-       -- Validate URL before using
-       IF g_backend_url IS NULL OR LENGTH (g_backend_url) < 10
-       THEN
-           -- Log configuration error
-           INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
-                VALUES (SYSTIMESTAMP, 'Invalid backend URL configured', 'send_to_backend_sync');
+    -- ===== BRIDGE SUPPORT =====
+    -- Check if using a custom bridge implementation
+    IF g_backend_url = 'POSTGRES_BRIDGE' THEN
+        BEGIN
+            -- Route to PostgreSQL bridge
+            -- The bridge handles transformation and ensures correct ordering
+            PLT_POSTGRES_BRIDGE.send_to_backend_with_routing(p_json);
+            RETURN;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Log bridge error but don't fail
+                l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                
+                INSERT INTO plt_telemetry_errors (
+                    error_time, 
+                    error_message, 
+                    module_name
+                ) VALUES (
+                    SYSTIMESTAMP, 
+                    'Bridge routing failed: ' || l_error_msg, 
+                    'send_to_backend_sync'
+                );
+                
+                IF g_autocommit THEN
+                    COMMIT;
+                END IF;
+                
+                -- Don't propagate - telemetry should never break the app
+                RETURN;
+        END;
+    ELSIF g_backend_url = 'OTLP_BRIDGE' THEN
+        BEGIN
+            -- Route to OTLP bridge
+            PLT_OTLP_BRIDGE.route_to_otlp(p_json);
+            RETURN;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Log bridge error but don't fail
+                l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                
+                INSERT INTO plt_telemetry_errors (
+                    error_time, 
+                    error_message, 
+                    module_name
+                ) VALUES (
+                    SYSTIMESTAMP, 
+                    'OTLP Bridge routing failed: ' || l_error_msg, 
+                    'send_to_backend_sync'
+                );
+                
+                IF g_autocommit THEN
+                    COMMIT;
+                END IF;
+                
+                RETURN;
+        END;
+    END IF;
+    -- ===== END BRIDGE SUPPORT =====
 
-           IF g_autocommit
-           THEN
-               COMMIT;
-           END IF;
+    -- Original HTTP implementation continues here...
+    
+    -- Get length in characters
+    l_length := LENGTH (p_json);
 
-           RETURN;
-       END IF;
+    -- Validate URL before using
+    IF g_backend_url IS NULL OR LENGTH (g_backend_url) < 10
+    THEN
+        -- Log configuration error
+        INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
+             VALUES (SYSTIMESTAMP, 'Invalid backend URL configured', 'send_to_backend_sync');
 
-       -- Set timeout with validation
-       UTL_HTTP.SET_TRANSFER_TIMEOUT (NVL (g_backend_timeout, 30));
+        IF g_autocommit
+        THEN
+            COMMIT;
+        END IF;
 
-       -- Send to your core-backend
-       l_req := UTL_HTTP.BEGIN_REQUEST (g_backend_url, 'POST', 'HTTP/1.1');
+        RETURN;
+    END IF;
 
-       -- Set headers - use LENGTHB for byte count
-       UTL_HTTP.SET_HEADER (l_req, 'Content-Type', 'application/json; charset=utf-8');
-       UTL_HTTP.SET_HEADER (l_req, 'Content-Length', LENGTHB (p_json));
-       UTL_HTTP.SET_HEADER (l_req, 'X-OTel-Source', 'PLTelemetry');
-       UTL_HTTP.SET_HEADER (l_req, 'X-PLSQL-API-KEY', NVL (g_api_key, 'not-configured'));
-       UTL_HTTP.SET_HEADER (l_req, 'X-PLSQL-DB', SYS_CONTEXT ('USERENV', 'DB_NAME'));
+    -- Set timeout with validation
+    UTL_HTTP.SET_TRANSFER_TIMEOUT (NVL (g_backend_timeout, 30));
 
-       -- Send VARCHAR2 directly if small enough
-       IF l_length <= 32767
-       THEN
-           UTL_HTTP.WRITE_TEXT (l_req, p_json);
-       ELSE
-           -- Send in chunks if larger
-           WHILE l_offset <= l_length
-           LOOP
-               l_amount := LEAST (32767, l_length - l_offset + 1);
-               l_buffer := SUBSTR (p_json, l_offset, l_amount);
-               UTL_HTTP.WRITE_TEXT (l_req, l_buffer);
-               l_offset := l_offset + l_amount;
-           END LOOP;
-       END IF;
+    -- Send to backend
+    l_req := UTL_HTTP.BEGIN_REQUEST (g_backend_url, 'POST', 'HTTP/1.1');
 
-       l_res := UTL_HTTP.GET_RESPONSE (l_req);
+    -- Set headers - use LENGTHB for byte count
+    UTL_HTTP.SET_HEADER (l_req, 'Content-Type', 'application/json; charset=utf-8');
+    UTL_HTTP.SET_HEADER (l_req, 'Content-Length', LENGTHB (p_json));
+    UTL_HTTP.SET_HEADER (l_req, 'X-OTel-Source', 'PLTelemetry');
+    UTL_HTTP.SET_HEADER (l_req, 'X-PLSQL-API-KEY', NVL (g_api_key, 'not-configured'));
+    UTL_HTTP.SET_HEADER (l_req, 'X-PLSQL-DB', SYS_CONTEXT ('USERENV', 'DB_NAME'));
 
-       -- Check response status
-       IF l_res.status_code NOT IN (200, 201, 202, 204)
-       THEN
-           -- Log failed send with truncated payload
-           BEGIN
-               INSERT INTO plt_failed_exports (export_time,
-                                               http_status,
-                                               payload,
-                                               error_message)
-                    VALUES (SYSTIMESTAMP,
-                            l_res.status_code,
-                            SUBSTR (p_json, 1, 4000),  -- Truncate payload to avoid overflow
-                            'HTTP ' || l_res.status_code || ': ' || SUBSTR (l_res.reason_phrase, 1, 200));
+    -- Send VARCHAR2 directly if small enough
+    IF l_length <= 32767
+    THEN
+        UTL_HTTP.WRITE_TEXT (l_req, p_json);
+    ELSE
+        -- Send in chunks if larger
+        WHILE l_offset <= l_length
+        LOOP
+            l_amount := LEAST (32767, l_length - l_offset + 1);
+            l_buffer := SUBSTR (p_json, l_offset, l_amount);
+            UTL_HTTP.WRITE_TEXT (l_req, l_buffer);
+            l_offset := l_offset + l_amount;
+        END LOOP;
+    END IF;
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;  -- Don't fail on logging
-           END;
-       END IF;
+    l_res := UTL_HTTP.GET_RESPONSE (l_req);
 
-       UTL_HTTP.END_RESPONSE (l_res);
-   EXCEPTION
-       WHEN UTL_HTTP.TRANSFER_TIMEOUT
-       THEN
-           -- Save error details before any operations
-           l_error_msg := 'Backend timeout after ' || NVL (g_backend_timeout, 30) || ' seconds';
+    -- Check response status
+    IF l_res.status_code NOT IN (200, 201, 202, 204)
+    THEN
+        -- Log failed send with truncated payload
+        BEGIN
+            LOOP
+                UTL_HTTP.READ_TEXT(l_res, l_chunk, 32767);
+                l_response_body := l_response_body || l_chunk;
+            END LOOP;
+        EXCEPTION
+            WHEN UTL_HTTP.END_OF_BODY THEN
+                NULL;
+        END;
+        
+        -- Log with response body
+        INSERT INTO plt_failed_exports (export_time,
+                                       http_status,
+                                       payload,
+                                       error_message)
+             VALUES (SYSTIMESTAMP,
+                     l_res.status_code,
+                     SUBSTR (p_json, 1, 4000),
+                     'HTTP ' || l_res.status_code || ': ' || SUBSTR(l_response_body, 1, 3000));
+    END IF;
 
-           -- Clean up connection if exists
-           BEGIN
-               IF l_res.status_code IS NOT NULL
-               THEN
-                   UTL_HTTP.END_RESPONSE (l_res);
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
+    UTL_HTTP.END_RESPONSE (l_res);
+EXCEPTION
+    WHEN UTL_HTTP.TRANSFER_TIMEOUT
+    THEN
+        -- Save error details before any operations
+        l_error_msg := 'Backend timeout after ' || NVL (g_backend_timeout, 30) || ' seconds';
 
-           -- Log timeout
-           BEGIN
-               INSERT INTO plt_failed_exports (export_time, payload, error_message)
-                    VALUES (SYSTIMESTAMP, SUBSTR (p_json, 1, 4000), l_error_msg);
+        -- Clean up connection if exists
+        BEGIN
+            IF l_res.status_code IS NOT NULL
+            THEN
+                UTL_HTTP.END_RESPONSE (l_res);
+            END IF;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                NULL;
+        END;
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
-       WHEN OTHERS
-       THEN
-           -- Save error details
-           l_error_msg := SUBSTR (SQLERRM, 1, 4000);
-           l_error_code := SQLCODE;
+        -- Log timeout
+        BEGIN
+            INSERT INTO plt_failed_exports (export_time, payload, error_message)
+                 VALUES (SYSTIMESTAMP, SUBSTR (p_json, 1, 4000), l_error_msg);
 
-           -- Clean up connection if exists
-           BEGIN
-               IF l_res.status_code IS NOT NULL
-               THEN
-                   UTL_HTTP.END_RESPONSE (l_res);
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
+            IF g_autocommit
+            THEN
+                COMMIT;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                NULL;
+        END;
+    WHEN OTHERS
+    THEN
+        -- Save error details
+        l_error_msg := SUBSTR (SQLERRM, 1, 4000);
+        l_error_code := SQLCODE;
 
-           -- Log error but don't fail the business logic
-           BEGIN
-               INSERT INTO plt_failed_exports (export_time,
-                                               payload,
-                                               error_message,
-                                               http_status)
-                    VALUES (SYSTIMESTAMP,
-                            SUBSTR (p_json, 1, 4000),
-                            'Error (' || l_error_code || '): ' || l_error_msg,
-                            -1  -- Indicate non-HTTP error
-                              );
+        -- Clean up connection if exists
+        BEGIN
+            IF l_res.status_code IS NOT NULL
+            THEN
+                UTL_HTTP.END_RESPONSE (l_res);
+            END IF;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                NULL;
+        END;
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
-   END send_to_backend_sync;
+        -- Log error but don't fail the business logic
+        BEGIN
+            INSERT INTO plt_failed_exports (export_time,
+                                            payload,
+                                            error_message,
+                                            http_status)
+                 VALUES (SYSTIMESTAMP,
+                         SUBSTR (p_json, 1, 4000),
+                         'Error (' || l_error_code || '): ' || l_error_msg,
+                         -1  -- Indicate non-HTTP error
+                           );
+
+            IF g_autocommit
+            THEN
+                COMMIT;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                NULL;
+        END;
+END send_to_backend_sync;
 
    --------------------------------------------------------------------------
    -- CORE TRACING FUNCTIONS
@@ -283,7 +372,7 @@ AS
                THEN
                    COMMIT;
                END IF;
-
+               
                RETURN l_trace_id;  -- Success! Exit function
            EXCEPTION
                WHEN OTHERS
@@ -468,218 +557,263 @@ AS
     * @param p_attributes Additional attributes to attach to the span
     */
    PROCEDURE end_span (p_span_id VARCHAR2, p_status VARCHAR2 DEFAULT 'OK', p_attributes t_attributes DEFAULT t_attributes ())
-   IS
-       l_json         VARCHAR2 (32767);
-       l_duration     NUMBER;
-       l_attrs_json   VARCHAR2 (4000);
-       l_start_time   TIMESTAMP WITH TIME ZONE;
-       l_error_msg    VARCHAR2 (4000);
-       l_error_code   NUMBER;
-       l_json_valid   NUMBER;
-   BEGIN
-       -- Validate input
-       IF p_span_id IS NULL
-       THEN
-           RETURN;  -- Silent fail for null span_id
-       END IF;
+    IS
+        l_json           VARCHAR2 (32767);
+        l_duration       NUMBER;
+        l_attrs_json     VARCHAR2 (4000);
+        l_events_json    VARCHAR2 (4000);  -- New for events
+        l_start_time     TIMESTAMP WITH TIME ZONE;
+        l_operation_name VARCHAR2(255);
+        l_error_msg      VARCHAR2 (4000);
+        l_error_code     NUMBER;
+        l_json_valid     NUMBER;
+        l_parent_span_id VARCHAR2(16); 
+    BEGIN
+        -- Validate input
+        IF p_span_id IS NULL
+        THEN
+            RETURN;  -- Silent fail for null span_id
+        END IF;
 
-       BEGIN
-           -- Get span info and calculate duration
-           SELECT start_time, EXTRACT (SECOND FROM (SYSTIMESTAMP - start_time)) * 1000
-             INTO l_start_time, l_duration
-             FROM plt_spans
+        BEGIN
+            -- Get span info including operation_name and calculate duration
+            SELECT start_time, 
+                   operation_name,
+                   parent_span_id,
+                   EXTRACT (SECOND FROM (SYSTIMESTAMP - start_time)) * 1000
+            INTO l_start_time, l_operation_name, l_parent_span_id, l_duration
+            FROM plt_spans
             WHERE span_id = p_span_id;
-       EXCEPTION
-           WHEN NO_DATA_FOUND
-           THEN
-               -- Span doesn't exist, log and exit
-               BEGIN
-                   INSERT INTO plt_telemetry_errors (error_time,
-                                                     error_message,
-                                                     module_name,
-                                                     span_id)
-                        VALUES (SYSTIMESTAMP,
-                                'end_span: Span not found',
-                                'end_span',
-                                p_span_id);
+        EXCEPTION
+            WHEN NO_DATA_FOUND
+            THEN
+                -- Span doesn't exist, log and exit
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time,
+                                                      error_message,
+                                                      module_name,
+                                                      span_id)
+                         VALUES (SYSTIMESTAMP,
+                                 'end_span: Span not found',
+                                 'end_span',
+                                 p_span_id);
 
-                   IF g_autocommit
-                   THEN
-                       COMMIT;
-                   END IF;
-               EXCEPTION
-                   WHEN OTHERS
-                   THEN
-                       NULL;
-               END;
+                    IF g_autocommit
+                    THEN
+                        COMMIT;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS
+                    THEN
+                        NULL;
+                END;
 
-               RETURN;
-           WHEN TOO_MANY_ROWS
-           THEN
-               -- This should never happen with proper PK, but...
-               l_duration := 0;
-       END;
+                RETURN;
+            WHEN TOO_MANY_ROWS
+            THEN
+                -- This should never happen with proper PK, but...
+                l_duration := 0;
+                l_operation_name := 'unknown_operation';
+        END;
 
-       -- Update span
-       UPDATE plt_spans
-          SET end_time = SYSTIMESTAMP, duration_ms = l_duration, status = p_status
+        -- Update span in Oracle
+        UPDATE plt_spans
+        SET end_time = SYSTIMESTAMP, duration_ms = l_duration, status = p_status
         WHERE span_id = p_span_id AND end_time IS NULL;  -- Don't update already ended spans
 
-       -- Check if update actually did something
-       IF SQL%ROWCOUNT = 0
-       THEN
-           -- Span already ended or doesn't exist
-           BEGIN
-               INSERT INTO plt_telemetry_errors (error_time,
-                                                 error_message,
-                                                 module_name,
-                                                 span_id)
-                    VALUES (SYSTIMESTAMP,
-                            'end_span: Span already ended or not found',
-                            'end_span',
-                            p_span_id);
+        -- Check if update actually did something
+        IF SQL%ROWCOUNT = 0
+        THEN
+            -- Span already ended or doesn't exist
+            BEGIN
+                INSERT INTO plt_telemetry_errors (error_time,
+                                                  error_message,
+                                                  module_name,
+                                                  span_id)
+                     VALUES (SYSTIMESTAMP,
+                             'end_span: Span already ended or not found',
+                             'end_span',
+                             p_span_id);
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
+                IF g_autocommit
+                THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS
+                THEN
+                    NULL;
+            END;
 
-           RETURN;
-       END IF;
+            RETURN;
+        END IF;
 
-       -- Update trace end time (optional update, don't check rowcount)
-       UPDATE plt_traces
-          SET end_time = SYSTIMESTAMP
-        WHERE     trace_id = g_current_trace_id
-              AND NOT EXISTS
-                      (SELECT 1
-                         FROM plt_spans
-                        WHERE trace_id = g_current_trace_id AND span_id != p_span_id AND end_time IS NULL);
+        -- Update trace end time (optional update, don't check rowcount)
+        UPDATE plt_traces
+        SET end_time = SYSTIMESTAMP
+        WHERE trace_id = g_current_trace_id
+          AND NOT EXISTS
+              (SELECT 1
+               FROM plt_spans
+               WHERE trace_id = g_current_trace_id AND span_id != p_span_id AND end_time IS NULL);
 
-       -- Build attributes JSON
-       BEGIN
-           l_attrs_json := attributes_to_json (p_attributes);
-       EXCEPTION
-           WHEN OTHERS
-           THEN
-               l_attrs_json := '{}';  -- Empty JSON on error
-       END;
+        -- Build attributes JSON
+        BEGIN
+            l_attrs_json := attributes_to_json (p_attributes);
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                l_attrs_json := '{}';  -- Empty JSON on error
+        END;
 
-       -- Build complete JSON
-       l_json :=
-              '{'
-           || '"trace_id":"'
-           || NVL (g_current_trace_id, 'unknown')
-           || '",'
-           || '"span_id":"'
-           || p_span_id
-           || '",'
-           || '"operation":"end_span",'
-           || '"status":"'
-           || NVL (p_status, 'UNKNOWN')
-           || '",'
-           || '"duration_ms":'
-           || NVL (TO_CHAR (l_duration), '0')
-           || ','
-           || '"timestamp":"'
-           || TO_CHAR (SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"')
-           || '",'
-           || '"attributes":'
-           || l_attrs_json
-           || '}';
+        -- ===== NEW: Build events JSON =====
+        BEGIN
+            -- Get events for this span
+            SELECT JSON_ARRAYAGG(
+                JSON_OBJECT(
+                    'name' VALUE event_name,
+                    'time' VALUE TO_CHAR(event_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'),
+                    'attributes' VALUE CASE 
+                        WHEN attributes IS NOT NULL AND attributes != '{}' 
+                        THEN JSON_OBJECT('data' VALUE attributes)
+                        ELSE JSON_OBJECT()
+                    END
+                )
+                ORDER BY event_time
+            ) INTO l_events_json
+            FROM plt_events 
+            WHERE span_id = p_span_id;
+            
+            -- If no events found, set empty array
+            IF l_events_json IS NULL THEN
+                l_events_json := '[]';
+            END IF;
+            
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Fallback to empty events on any error
+                l_events_json := '[]';
+                
+                -- Log the issue but don't fail
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time,
+                                                      error_message,
+                                                      module_name,
+                                                      span_id)
+                         VALUES (SYSTIMESTAMP,
+                                 'Failed to build events JSON: ' || SUBSTR(DBMS_UTILITY.format_error_stack|| ' - '|| DBMS_UTILITY.format_error_backtrace, 1, 200),
+                                 'end_span',
+                                 p_span_id);
+                    IF g_autocommit THEN COMMIT; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+        END;
 
-       -- Validate JSON
-       BEGIN
-           IF l_json IS NOT JSON
-           THEN
-               RAISE_APPLICATION_ERROR (-20003, 'Invalid JSON structure');
-           END IF;
-       EXCEPTION
-           WHEN OTHERS
-           THEN
-               -- Log invalid JSON
-               BEGIN
-                   INSERT INTO plt_telemetry_errors (error_time,
-                                                     error_message,
-                                                     module_name,
-                                                     span_id)
-                        VALUES (SYSTIMESTAMP,
-                                'Invalid JSON: ' || SUBSTR (l_json, 1, 200),
-                                'end_span',
-                                p_span_id);
+        -- Build complete JSON with all required fields including events
+        l_json := '{'
+            || '"trace_id":"' || NVL (g_current_trace_id, 'unknown') || '",'
+            || '"span_id":"' || p_span_id || '",'
+            || '"parent_span_id":"' || NVL(l_parent_span_id, '') || '",'
+            || '"operation_name":"' || REPLACE(l_operation_name, '"', '\"') || '",' 
+            || '"start_time":"' || TO_CHAR(l_start_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'  
+            || '"end_time":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'   
+            || '"duration_ms":' || NVL (TO_CHAR (l_duration), '0') || ','
+            || '"status":"' || NVL (p_status, 'OK') || '",'
+            || '"events":' || l_events_json || ','  -- ? NEW: Include events
+            || '"attributes":' || l_attrs_json
+            || '}';
 
-                   IF g_autocommit
-                   THEN
-                       COMMIT;
-                   END IF;
-               EXCEPTION
-                   WHEN OTHERS
-                   THEN
-                       NULL;
-               END;
+        -- Debug log
+        cent_dbg_pkg.dbg_log('PLTELEMETRY', 'END_SPAN JSON[' || l_json || ']'); -- ##MDEBUG
 
-               RETURN;  -- Don't send invalid JSON
-       END;
+        -- Validate JSON
+        BEGIN
+            IF l_json IS NOT JSON
+            THEN
+                RAISE_APPLICATION_ERROR (-20003, 'Invalid JSON structure');
+            END IF;
+        EXCEPTION
+            WHEN OTHERS
+            THEN
+                -- Log invalid JSON
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time,
+                                                      error_message,
+                                                      module_name,
+                                                      span_id)
+                         VALUES (SYSTIMESTAMP,
+                                 'Invalid JSON: ' || SUBSTR (l_json, 1, 200),
+                                 'end_span',
+                                 p_span_id);
 
-       -- Send to backend
-       send_to_backend (l_json);
+                    IF g_autocommit
+                    THEN
+                        COMMIT;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS
+                    THEN
+                        NULL;
+                END;
 
-       IF g_autocommit
-       THEN
-           COMMIT;
-       END IF;
-   EXCEPTION
-       WHEN OTHERS
-       THEN
-           -- Global exception handler
-           l_error_msg := SUBSTR (SQLERRM, 1, 4000);
-           l_error_code := SQLCODE;
+                RETURN;  -- Don't send invalid JSON
+        END;
 
-           BEGIN
-               INSERT INTO plt_telemetry_errors (error_time,
-                                                 error_message,
-                                                 error_code,
-                                                 error_stack,
-                                                 module_name,
-                                                 span_id)
-                    VALUES (SYSTIMESTAMP,
-                            l_error_msg,
-                            l_error_code,
-                            SUBSTR (DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000),
-                            'end_span',
-                            p_span_id);
+        -- Send to backend
+        send_to_backend (l_json);
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
+        IF g_autocommit
+        THEN
+            COMMIT;
+        END IF;
+    EXCEPTION
+        WHEN OTHERS
+        THEN
+            -- Global exception handler
+            l_error_msg := SUBSTR (SQLERRM, 1, 4000);
+            l_error_code := SQLCODE;
 
-           -- Try to at least update the span as FAILED
-           BEGIN
-               UPDATE plt_spans
-                  SET end_time = SYSTIMESTAMP, status = 'ERROR', duration_ms = 0
+            BEGIN
+                INSERT INTO plt_telemetry_errors (error_time,
+                                                  error_message,
+                                                  error_code,
+                                                  error_stack,
+                                                  module_name,
+                                                  span_id)
+                     VALUES (SYSTIMESTAMP,
+                             l_error_msg,
+                             l_error_code,
+                             SUBSTR (DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000),
+                             'end_span',
+                             p_span_id);
+
+                IF g_autocommit
+                THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS
+                THEN
+                    NULL;
+            END;
+
+            -- Try to at least update the span as FAILED
+            BEGIN
+                UPDATE plt_spans
+                SET end_time = SYSTIMESTAMP, status = 'ERROR', duration_ms = 0
                 WHERE span_id = p_span_id AND end_time IS NULL;
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
-   END end_span;
+                IF g_autocommit
+                THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS
+                THEN
+                    NULL;
+            END;
+    END end_span;
 
    /**
     * Adds an event to an active span
@@ -900,7 +1034,7 @@ AS
        BEGIN
            l_json :=
                   '{'
-               || '"metric_name":"'
+               || '"name":"'
                || REPLACE (SUBSTR (p_metric_name, 1, 255), '"', '\"')
                || '",'
                || '"value":'
@@ -921,6 +1055,8 @@ AS
                || '"attributes":'
                || l_attrs_json
                || '}';
+
+           cent_dbg_pkg.dbg_log('PLTELEMETRY', 'LOG_METRIC 010 l_json['||l_json||']'); -- ##MDEBUG
 
            -- Validate JSON
            IF l_json IS NOT JSON
@@ -1196,84 +1332,164 @@ AS
            RETURN SUBSTR ('{"_error":"' || REPLACE (SUBSTR (SQLERRM, 1, 100), '"', '\"') || '","_error_code":"' || SQLCODE || '"}', 1, 4000);
    END;
 
-   /**
-    * Sends telemetry data to the configured backend
-    *
-    * @param p_json JSON payload to send
-    * @note Uses async mode by default, falls back to sync on failure
-    */
-   PROCEDURE send_to_backend (p_json VARCHAR2)
-   IS
-       l_error_msg    VARCHAR2 (4000);
-       l_error_code   NUMBER;
-   BEGIN
-       -- Validate input
-       IF p_json IS NULL
-       THEN
-           RETURN;
-       END IF;
 
-       IF g_async_mode
-       THEN
-           -- Queue for async processing
-           BEGIN
-               INSERT INTO plt_queue (payload)
-                    VALUES (p_json);
+    /**
+     * Sends telemetry data to the configured backend
+     *
+     * @param p_json JSON payload to send
+     * @note Uses async mode by default, falls back to sync on failure
+     */
+    PROCEDURE send_to_backend (p_json VARCHAR2)
+    IS
+        l_error_msg    VARCHAR2 (4000);
+        l_error_code   NUMBER;
+        l_data_type    VARCHAR2(20);
+    BEGIN
+        -- Validate input
+        IF p_json IS NULL
+        THEN
+            RETURN;
+        END IF;
 
-               IF g_autocommit
-               THEN
-                   COMMIT;
-               END IF;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   -- Queue insert failed, try sync as fallback
-                   l_error_msg := SUBSTR (SQLERRM, 1, 4000);
-                   l_error_code := SQLCODE;
+        -- ===== BRIDGE SUPPORT FOR ASYNC MODE =====
+        -- If using bridge and async mode, we need special handling for ordering
+        IF g_backend_url = 'POSTGRES_BRIDGE' AND g_async_mode THEN
+            -- Determine data type for proper ordering
+            IF p_json LIKE '%"duration_ms"%' THEN
+                l_data_type := 'SPAN';
+            ELSIF p_json LIKE '%"name"%' AND p_json LIKE '%"value"%' THEN
+                l_data_type := 'METRIC';
+            ELSE
+                l_data_type := 'OTHER';
+            END IF;
+            
+            -- Queue with metadata for ordered processing
+            BEGIN
+                INSERT INTO plt_queue (
+                    payload,
+                    -- Add a processing priority hint in process_attempts field
+                    -- 0 = normal, but we can use it to hint at order
+                    process_attempts,
+                    created_at
+                ) VALUES (
+                    p_json,
+                    CASE l_data_type
+                        WHEN 'SPAN' THEN 0     -- Process spans first
+                        WHEN 'METRIC' THEN 1   -- Process metrics after spans
+                        ELSE 2                 -- Everything else last
+                    END,
+                    SYSTIMESTAMP
+                );
 
-                   -- Log the queue failure
-                   BEGIN
-                       INSERT INTO plt_telemetry_errors (error_time,
-                                                         error_message,
-                                                         error_code,
-                                                         module_name)
-                            VALUES (SYSTIMESTAMP,
-                                    'Failed to queue telemetry, falling back to sync: ' || l_error_msg,
-                                    l_error_code,
-                                    'send_to_backend');
+                IF g_autocommit THEN
+                    COMMIT;
+                END IF;
+                
+                RETURN;  -- Don't continue with normal flow
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Queue insert failed, try sync as fallback
+                    l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                    l_error_code := SQLCODE;
+                    
+                    -- Log the queue failure
+                    BEGIN
+                        INSERT INTO plt_telemetry_errors (
+                            error_time,
+                            error_message,
+                            error_code,
+                            module_name
+                        ) VALUES (
+                            SYSTIMESTAMP,
+                            'Failed to queue for bridge, falling back to sync: ' || l_error_msg,
+                            l_error_code,
+                            'send_to_backend'
+                        );
 
-                       IF g_autocommit
-                       THEN
-                           COMMIT;
-                       END IF;
-                   EXCEPTION
-                       WHEN OTHERS
-                       THEN
-                           NULL;
-                   END;
+                        IF g_autocommit THEN
+                            COMMIT;
+                        END IF;
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            NULL;
+                    END;
 
-                   -- Fallback to synchronous
-                   BEGIN
-                       send_to_backend_sync (p_json);
-                   EXCEPTION
-                       WHEN OTHERS
-                       THEN
-                           -- Both async and sync failed, give up silently
-                           NULL;
-                   END;
-           END;
-       ELSE
-           -- Original synchronous sending
-           BEGIN
-               send_to_backend_sync (p_json);
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   -- Sync failed, but don't propagate
-                   NULL;
-           END;
-       END IF;
-   END send_to_backend;
+                    -- Fallback to synchronous
+                    BEGIN
+                        send_to_backend_sync(p_json);
+                    EXCEPTION
+                        WHEN OTHERS THEN
+                            -- Both async and sync failed, give up silently
+                            NULL;
+                    END;
+                    
+                    RETURN;
+            END;
+        END IF;
+        -- ===== END BRIDGE SUPPORT =====
+
+        -- Original async/sync logic
+        IF g_async_mode
+        THEN
+            -- Queue for async processing
+            BEGIN
+                INSERT INTO plt_queue (payload)
+                     VALUES (p_json);
+
+                IF g_autocommit
+                THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS
+                THEN
+                    -- Queue insert failed, try sync as fallback
+                    l_error_msg := SUBSTR (SQLERRM, 1, 4000);
+                    l_error_code := SQLCODE;
+
+                    -- Log the queue failure
+                    BEGIN
+                        INSERT INTO plt_telemetry_errors (error_time,
+                                                          error_message,
+                                                          error_code,
+                                                          module_name)
+                             VALUES (SYSTIMESTAMP,
+                                     'Failed to queue telemetry, falling back to sync: ' || l_error_msg,
+                                     l_error_code,
+                                     'send_to_backend');
+
+                        IF g_autocommit
+                        THEN
+                            COMMIT;
+                        END IF;
+                    EXCEPTION
+                        WHEN OTHERS
+                        THEN
+                            NULL;
+                    END;
+
+                    -- Fallback to synchronous
+                    BEGIN
+                        send_to_backend_sync (p_json);
+                    EXCEPTION
+                        WHEN OTHERS
+                        THEN
+                            -- Both async and sync failed, give up silently
+                            NULL;
+                    END;
+            END;
+        ELSE
+            -- Original synchronous sending
+            BEGIN
+                send_to_backend_sync (p_json);
+            EXCEPTION
+                WHEN OTHERS
+                THEN
+                    -- Sync failed, but don't propagate
+                    NULL;
+            END;
+        END IF;
+    END send_to_backend;
 
    /**
     * Sets the current trace context in Oracle session info
@@ -1305,101 +1521,178 @@ AS
     * @param p_batch_size Number of queue entries to process (default 100)
     * @note Should be called periodically by a scheduled job
     */
-   PROCEDURE process_queue (p_batch_size NUMBER DEFAULT 100)
-   IS
-       CURSOR c_queue
-       IS
+    PROCEDURE process_queue (p_batch_size NUMBER DEFAULT 100)
+    IS
+        l_processed_count   NUMBER := 0;
+        l_error_count       NUMBER := 0;
+        l_error_msg         VARCHAR2(4000);
+        l_batch_size        NUMBER;
+    BEGIN
+        -- -------- Init --------
+        l_batch_size := NVL(NULLIF(p_batch_size, 0), 100);
+
+        /* --------------------------------------------------------------------
+           FIRST CASE: using the bridge ¿ keep original insertion order *and*
+           prioritise by process_attempts so the bridge groups similar payloads
+           -------------------------------------------------------------------- */
+        IF g_backend_url = 'POSTGRES_BRIDGE' THEN
+            FOR rec IN (
                 SELECT queue_id, payload
-                  FROM plt_queue
-                 WHERE processed = 'N' AND process_attempts < 3
-              ORDER BY created_at
-           FETCH FIRST NVL (NULLIF (p_batch_size, 0), 100) ROWS ONLY  -- Protect against 0 or null
-           FOR UPDATE
-               SKIP LOCKED;
+                FROM (
+                    SELECT queue_id,
+                           payload,
+                           process_attempts
+                    FROM   plt_queue
+                    WHERE  processed = 'N'
+                       AND process_attempts < 5
+                    ORDER  BY process_attempts,        -- bridge-specific priority
+                              queue_id                -- stable insertion order
+                )
+                WHERE ROWNUM <= l_batch_size
+            )
+            LOOP
+                -- same processing block -----------------------------
+                BEGIN
+                    -- 1) Increment attempt counter
+                    UPDATE plt_queue
+                    SET    process_attempts = process_attempts + 1,
+                           last_attempt_time = SYSTIMESTAMP
+                    WHERE  queue_id  = rec.queue_id
+                      AND  processed = 'N';
 
-       l_processed_count   NUMBER := 0;
-       l_error_count       NUMBER := 0;
-       l_error_msg         VARCHAR2 (4000);
-       l_error_code        NUMBER;
-   BEGIN
-       -- Validate batch size
-       IF p_batch_size < 0 OR p_batch_size > 10000
-       THEN
-           RAISE_APPLICATION_ERROR (-20007, 'Invalid batch size: must be between 1 and 10000');
-       END IF;
+                    -- 2) Only proceed if exactly one row was touched
+                    IF SQL%ROWCOUNT = 1 THEN
+                        -- send payload
+                        send_to_backend_sync(rec.payload);
 
-       FOR rec IN c_queue
-       LOOP
-           BEGIN
-               -- Send synchronously
-               send_to_backend_sync (rec.payload);
+                        -- mark as processed
+                        UPDATE plt_queue
+                        SET    processed      = 'Y',
+                               processed_time = SYSTIMESTAMP
+                        WHERE  queue_id = rec.queue_id;
 
-               -- Mark as processed
-               UPDATE plt_queue
-                  SET processed = 'Y', processed_time = SYSTIMESTAMP
-                WHERE queue_id = rec.queue_id;
+                        l_processed_count := l_processed_count + 1;
+                    END IF;
 
-               l_processed_count := l_processed_count + 1;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   l_error_msg := SUBSTR (SQLERRM, 1, 200);
-                   l_error_count := l_error_count + 1;
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        l_error_msg := SUBSTR(
+                            DBMS_UTILITY.format_error_stack
+                            || ' - '
+                            || DBMS_UTILITY.format_error_backtrace,
+                            1, 200);
+                        l_error_count := l_error_count + 1;
 
-                   -- Increment attempts on failure
-                   BEGIN
-                       UPDATE plt_queue
-                          SET process_attempts = process_attempts + 1, last_error = l_error_msg, last_attempt_time = SYSTIMESTAMP
-                        WHERE queue_id = rec.queue_id;
-                   EXCEPTION
-                       WHEN OTHERS
-                       THEN
-                           NULL;  -- Don't fail on update
-                   END;
-           END;
+                        UPDATE plt_queue
+                        SET    last_error = l_error_msg
+                        WHERE  queue_id   = rec.queue_id;
 
-           -- Commit each record to release lock
-           COMMIT;
-       END LOOP;
+                        IF g_autocommit THEN
+                            COMMIT;
+                        END IF;
+                END;
+            END LOOP;
 
-       -- Log processing summary if we did something
-       IF l_processed_count > 0 OR l_error_count > 0
-       THEN
-           BEGIN
-               INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
-                    VALUES (SYSTIMESTAMP, 'Queue processed: ' || l_processed_count || ' success, ' || l_error_count || ' errors', 'process_queue');
+        /* --------------------------------------------------------------------
+           SECOND CASE: normal backend ¿ just honour insertion order
+           -------------------------------------------------------------------- */
+        ELSE
+            FOR rec IN (
+                SELECT queue_id, payload
+                FROM (
+                    SELECT queue_id,
+                           payload
+                    FROM   plt_queue
+                    WHERE  processed = 'N'
+                       AND process_attempts < 5
+                    ORDER  BY queue_id                  -- insertion order only
+                )
+                WHERE ROWNUM <= l_batch_size
+            )
+            LOOP
+                -- same processing block -----------------------------
+                BEGIN
+                    -- 1) Increment attempt counter
+                    UPDATE plt_queue
+                    SET    process_attempts = process_attempts + 1,
+                           last_attempt_time = SYSTIMESTAMP
+                    WHERE  queue_id  = rec.queue_id
+                      AND  processed = 'N';
 
-               COMMIT;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
-       END IF;
-   EXCEPTION
-       WHEN OTHERS
-       THEN
-           l_error_code := SQLCODE;
-           l_error_msg := SUBSTR (SQLERRM, 1, 4000);
+                    -- 2) Only proceed if exactly one row was touched
+                    IF SQL%ROWCOUNT = 1 THEN
+                        -- send payload
+                        send_to_backend_sync(rec.payload);
 
-           -- Global handler - log but don't propagate
-           BEGIN
-               INSERT INTO plt_telemetry_errors (error_time,
-                                                 error_message,
-                                                 error_code,
-                                                 module_name)
-                    VALUES (SYSTIMESTAMP,
-                            'process_queue failed: ' || SUBSTR (l_error_msg, 1, 3800),
-                            l_error_code,
-                            'process_queue');
+                        -- mark as processed
+                        UPDATE plt_queue
+                        SET    processed      = 'Y',
+                               processed_time = SYSTIMESTAMP
+                        WHERE  queue_id = rec.queue_id;
 
-               COMMIT;
-           EXCEPTION
-               WHEN OTHERS
-               THEN
-                   NULL;
-           END;
-   END process_queue;
+                        l_processed_count := l_processed_count + 1;
+                    END IF;
+
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        l_error_msg := SUBSTR(
+                            DBMS_UTILITY.format_error_stack
+                            || ' - '
+                            || DBMS_UTILITY.format_error_backtrace,
+                            1, 200);
+                        l_error_count := l_error_count + 1;
+
+                        UPDATE plt_queue
+                        SET    last_error = l_error_msg
+                        WHERE  queue_id   = rec.queue_id;
+
+                        IF g_autocommit THEN
+                            COMMIT;
+                        END IF;
+                END;
+            END LOOP;
+        END IF;
+
+        -- -------- Summary logging --------
+        IF l_processed_count > 0 OR l_error_count > 0 THEN
+            INSERT INTO plt_telemetry_errors (error_time,
+                                              error_message,
+                                              module_name)
+            VALUES (SYSTIMESTAMP,
+                    'Queue processed: '
+                      || l_processed_count
+                      || ' success, '
+                      || l_error_count
+                      || ' errors',
+                    'process_queue');
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            INSERT INTO plt_telemetry_errors (error_time,
+                                              error_message,
+                                              module_name)
+            VALUES (SYSTIMESTAMP,
+                    'process_queue error: '
+                      || SUBSTR(DBMS_UTILITY.format_error_stack
+                                || ' - '
+                                || DBMS_UTILITY.format_error_backtrace,
+                                1, 4000),
+                    'process_queue');
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
+    END process_queue;
+
 
    --------------------------------------------------------------------------
    -- CONFIGURATION GETTERS AND SETTERS
@@ -1507,6 +1800,190 @@ AS
    BEGIN
        RETURN g_current_span_id;
    END get_current_span_id;
+
+        
+    /**
+     * Internal helper to build and send log JSON
+     */
+    PROCEDURE send_log_internal(
+        p_trace_id   VARCHAR2,
+        p_span_id    VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_attributes t_attributes
+    )
+    IS
+        l_json         VARCHAR2(32767);
+        l_attrs_json   VARCHAR2(4000);
+        l_error_msg    VARCHAR2(4000);
+        l_error_code   NUMBER;
+    BEGIN
+        -- Validate required inputs
+        IF p_level IS NULL OR p_message IS NULL THEN
+            RETURN; -- Silent fail for missing required params
+        END IF;
+
+        -- Convert attributes to JSON safely
+        BEGIN
+            l_attrs_json := attributes_to_json(p_attributes);
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_attrs_json := '{}';
+                
+                -- Log attribute conversion failure
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
+                    VALUES (
+                        SYSTIMESTAMP,
+                        'send_log_internal: Failed to convert attributes - ' || SUBSTR(DBMS_UTILITY.format_error_stack|| ' - '|| DBMS_UTILITY.format_error_backtrace, 1, 200),
+                        'send_log_internal'
+                    );
+                    IF g_autocommit THEN COMMIT; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+        END;
+
+        -- Build log JSON
+        l_json := '{'
+            || '"severity":"' || UPPER(p_level) || '",'
+            || '"message":"' || REPLACE(SUBSTR(p_message, 1, 4000), '"', '\"') || '",'
+            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
+            || CASE 
+                    WHEN p_trace_id IS NOT NULL AND LENGTH(p_trace_id) = 32 
+                    THEN '"trace_id":"' || p_trace_id || '",'
+                    ELSE ''
+                END
+            || CASE 
+                    WHEN p_span_id IS NOT NULL AND LENGTH(p_span_id) = 16 
+                    THEN '"span_id":"' || p_span_id || '",'
+                    ELSE ''
+                END
+            || '"attributes":' || l_attrs_json
+            || '}';
+
+        -- Store in local logs table (optional - for Oracle-side querying)
+        BEGIN
+            INSERT INTO plt_logs (
+                trace_id,
+                span_id, 
+                log_level,
+                message,
+                timestamp,
+                attributes
+            ) VALUES (
+                p_trace_id,
+                p_span_id,
+                UPPER(p_level),
+                SUBSTR(p_message, 1, 4000),
+                SYSTIMESTAMP,
+                l_attrs_json
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Log table insert failed, but don't stop the flow
+                l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
+                    VALUES (
+                        SYSTIMESTAMP,
+                        'send_log_internal: Failed to insert into plt_logs - ' || l_error_msg,
+                        'send_log_internal'
+                    );
+                    IF g_autocommit THEN COMMIT; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+        END;
+
+        -- Send to backend (let it handle routing to logs endpoint)
+        BEGIN
+            send_to_backend(l_json);
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                
+                -- Log send failure
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (error_time, error_message, module_name)
+                    VALUES (
+                        SYSTIMESTAMP,
+                        'send_log_internal: Failed to send to backend - ' || l_error_msg,
+                        'send_log_internal'
+                    );
+                    IF g_autocommit THEN COMMIT; END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL;
+                END;
+        END;
+
+        -- Final commit if needed
+        IF g_autocommit THEN
+            COMMIT;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Ultimate safety net
+            l_error_code := SQLCODE;
+            l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+
+            BEGIN
+                INSERT INTO plt_telemetry_errors (error_time, error_message, error_code, module_name)
+                VALUES (
+                    SYSTIMESTAMP,
+                    'send_log_internal: Unexpected error - ' || l_error_msg,
+                    l_error_code,
+                    'send_log_internal'
+                );
+                IF g_autocommit THEN COMMIT; END IF;
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+    END send_log_internal;
+
+    /**
+     * Logs with explicit trace context
+     */
+    PROCEDURE log_with_trace(
+        p_trace_id   VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_attributes t_attributes DEFAULT t_attributes()
+    )
+    IS
+    BEGIN
+        send_log_internal(p_trace_id, NULL, p_level, p_message, p_attributes);
+    END log_with_trace;
+
+    /**
+     * Logs attached to an active span
+     */
+    PROCEDURE add_log(
+        p_span_id    VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2, 
+        p_attributes t_attributes DEFAULT t_attributes()
+    )
+    IS
+    BEGIN
+        -- Use current trace context with the provided span
+        send_log_internal(g_current_trace_id, p_span_id, p_level, p_message, p_attributes);
+    END add_log;
+
+    /**
+     * Standalone logs without trace context
+     */
+    PROCEDURE log_message(
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_attributes t_attributes DEFAULT t_attributes()
+    )
+    IS
+    BEGIN
+        send_log_internal(NULL, NULL, p_level, p_message, p_attributes);
+    END log_message;
 
 END PLTelemetry;
 /

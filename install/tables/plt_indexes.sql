@@ -51,6 +51,11 @@ CREATE INDEX idx_plt_telemetry_errors_span ON plt_telemetry_errors(span_id);
 CREATE INDEX idx_plt_telemetry_errors_module ON plt_telemetry_errors(module_name, error_time);
 CREATE INDEX idx_plt_telemetry_errors_code ON plt_telemetry_errors(error_code, error_time);
 
+
+CREATE INDEX idx_plt_logs_trace_id ON plt_logs(trace_id);
+CREATE INDEX idx_plt_logs_span_id ON plt_logs(span_id);
+CREATE INDEX idx_plt_logs_timestamp ON plt_logs(timestamp);
+
 -- Composite indexes for common query patterns
 CREATE INDEX idx_plt_trace_span_lookup ON plt_spans(trace_id, span_id);
 CREATE INDEX idx_plt_active_spans ON plt_spans(trace_id, end_time) WHERE end_time IS NULL;

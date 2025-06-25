@@ -1,0 +1,115 @@
+# =============================================================================
+# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY
+# File: otel-collector-config.yaml
+# =============================================================================
+
+receivers:
+  # HTTP receiver for PLTelemetry (Oracle PL/SQL)
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "*"
+          allowed_headers:
+            - "*"
+
+  # Prometheus receiver for collector metrics
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+
+processors:
+  # Batch processor for efficiency
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Resource processor to add consistent labels
+  resource:
+    attributes:
+      - key: service.namespace
+        value: "pltelemetry-demo"
+        action: upsert
+      - key: deployment.environment
+        value: "demo"
+        action: upsert
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    limit_mib: 512
+    spike_limit_mib: 128
+    check_interval: 1s
+
+  # Attributes processor for PLTelemetry specific handling
+  attributes:
+    actions:
+      # Rename Oracle-specific attributes to standard names
+      - key: db.statement
+        from_attribute: oracle.sql
+        action: insert
+      - key: db.operation
+        from_attribute: oracle.operation
+        action: insert
+      # Add source identification
+      - key: telemetry.source
+        value: "oracle-plsql"
+        action: insert
+
+exporters:
+  # Send traces to Tempo
+  otlp/tempo:
+    endpoint: http://tempo:4317
+    tls:
+      insecure: true
+
+  # Send logs to Loki
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    
+  # Send metrics to Prometheus
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "pltelemetry"
+    const_labels:
+      source: "oracle"
+
+  # Debug output for development
+  debug:
+    verbosity: detailed
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # File export for backup/debugging
+  file:
+    path: /tmp/otel-output.json
+
+service:
+  pipelines:
+    # Traces pipeline
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/tempo, debug]
+
+    # Metrics pipeline  
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+
+    # Logs pipeline
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, attributes, batch]
+      exporters: [loki, debug]
+
+  extensions: []

@@ -1,0 +1,176 @@
+# =============================================================================
+# PLTelemetry Demo Stack - Grafana + OTEL Collector
+# =============================================================================
+# 
+# Simple setup for demos - NO SECURITY, just functionality
+# 
+# Stack includes:
+# - OTEL Collector (receives PLTelemetry data)
+# - Grafana (dashboards and visualization)
+# - Tempo (distributed tracing backend)
+# - Loki (log aggregation)
+# - Prometheus (metrics storage)
+#
+# Usage:
+#   docker-compose up -d
+#   Open http://localhost:3020 (admin/admin)
+#   Configure your PLTelemetry to send to http://localhost:4318
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # =============================================================================
+  # OTEL COLLECTOR - Receives PLTelemetry data
+  # =============================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: plt-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver (PLTelemetry uses this)
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - plt-demo
+    restart: unless-stopped
+
+  # =============================================================================
+  # TEMPO - Distributed tracing backend
+  # =============================================================================
+  tempo:
+    image: grafana/tempo:latest
+    container_name: plt-tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"   # Tempo API
+      - "9411:9411"   # Zipkin receiver
+    networks:
+      - plt-demo
+    restart: unless-stopped
+    user: "0"  # Run as root to fix permissions
+
+  # =============================================================================
+  # LOKI - Log aggregation
+  # =============================================================================
+  loki:
+    image: grafana/loki:latest
+    container_name: plt-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"   # Loki API
+    networks:
+      - plt-demo
+    restart: unless-stopped
+
+  # =============================================================================
+  # PROMETHEUS - Metrics storage
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: plt-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"   # Prometheus UI
+    networks:
+      - plt-demo
+    restart: unless-stopped
+
+  # =============================================================================
+  # GRAFANA - Visualization and dashboards
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: plt-grafana
+    environment:
+      # No security for demo
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      # Auto-provision datasources and dashboards
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3020:3000"   # Grafana UI
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - plt-demo
+    restart: unless-stopped
+
+  # =============================================================================
+  # ORACLE XE (Optional) - For testing PLTelemetry directly
+  # =============================================================================
+  oracle-xe:
+    image: gvenzl/oracle-xe:latest
+    container_name: plt-oracle-xe
+    environment:
+      - ORACLE_PASSWORD=PLTelemetry123
+      - ORACLE_DATABASE=PLTDB
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - ./oracle/init:/container-entrypoint-initdb.d:ro
+    ports:
+      - "1521:1521"   # Oracle TNS
+      - "5500:5500"   # Oracle EM Express
+    networks:
+      - plt-demo
+    restart: unless-stopped
+    # Uncomment to enable Oracle (requires more resources)
+    profiles:
+      - oracle
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  tempo-data:
+    driver: local
+  loki-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  oracle-data:
+    driver: local
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  plt-demo:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
