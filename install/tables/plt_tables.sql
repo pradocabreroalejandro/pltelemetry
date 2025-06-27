@@ -166,3 +166,11 @@ CREATE TABLE plt_logs (
     attributes   VARCHAR2(4000) DEFAULT '{}',
     created_at   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
 );
+
+CREATE TABLE plt_span_attributes (
+    span_id         VARCHAR2(16) NOT NULL,
+    attribute_key   VARCHAR2(255) NOT NULL,
+    attribute_value VARCHAR2(4000),
+    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+    CONSTRAINT plt_span_attr_pk PRIMARY KEY (span_id, attribute_key)
+);

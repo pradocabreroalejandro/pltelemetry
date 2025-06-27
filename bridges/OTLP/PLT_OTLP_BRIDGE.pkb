@@ -511,6 +511,13 @@ AS
         l_final_clob := get_large_string_content(l_result);
         cleanup_large_string(l_result);
         
+        -- DEBUG: Log what we're parsing
+        IF g_debug_mode THEN
+            log_error('DEBUG convert_attributes_legacy', 
+                     'Input: ' || SUBSTR(p_attrs_json, 1, 200) || 
+                     ' Output: ' || SUBSTR(DBMS_LOB.SUBSTR(l_final_clob, 200, 1), 1, 200));
+        END IF;
+        
         RETURN l_final_clob;
         
     EXCEPTION
@@ -596,6 +603,13 @@ AS
     RETURN CLOB
     IS
     BEGIN
+
+        IF g_debug_mode THEN
+            DBMS_OUTPUT.PUT_LINE('convert_attributes_to_otlp_enhanced called with mode: ' || 
+                                 CASE WHEN g_use_native_json THEN 'NATIVE' ELSE 'LEGACY' END);
+            DBMS_OUTPUT.PUT_LINE('Input: ' || SUBSTR(p_attrs_json, 1, 200));
+        END IF;
+
         IF g_use_native_json THEN
             RETURN convert_attributes_native(p_attrs_json);
         ELSE
@@ -1049,6 +1063,17 @@ AS
                                ' chars, using CLOB: ' || CASE WHEN is_using_clob(l_builder) THEN 'YES' ELSE 'NO' END);
         END IF;
         
+        IF g_debug_mode THEN
+            DECLARE
+                l_debug_chunk VARCHAR2(4000);
+            BEGIN
+                l_debug_chunk := DBMS_LOB.SUBSTR(l_final_json, 4000, 1);
+                DBMS_OUTPUT.PUT_LINE('==== FINAL OTLP JSON (first 4000 chars) ====');
+                DBMS_OUTPUT.PUT_LINE(l_debug_chunk);
+                DBMS_OUTPUT.PUT_LINE('==== END OTLP JSON ====');
+            END;
+        END IF;
+        
         send_to_endpoint_enhanced(g_traces_endpoint, l_final_json);
         
         -- Cleanup
@@ -1125,7 +1150,7 @@ AS
         append_to_large_string(l_builder, '          "dataPoints": [{' || CHR(10));
         append_to_large_string(l_builder, '            "timeUnixNano": "' || 
                               to_unix_nano(NVL(l_timestamp, TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'))) || '",' || CHR(10));
-        append_to_large_string(l_builder, '            "asDouble": ' || l_value);
+        append_to_large_string(l_builder, '            "asDouble": ' || TO_CHAR(l_value, 'FM99999999999999999990.099999999'));
 
         -- Add attributes
         IF l_attributes IS NOT NULL THEN

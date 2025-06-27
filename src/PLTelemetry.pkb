@@ -724,9 +724,7 @@ END send_to_backend_sync;
             || '"attributes":' || l_attrs_json
             || '}';
 
-        -- Debug log
-        cent_dbg_pkg.dbg_log('PLTELEMETRY', 'END_SPAN JSON[' || l_json || ']'); -- ##MDEBUG
-
+        
         -- Validate JSON
         BEGIN
             IF l_json IS NOT JSON
@@ -1055,8 +1053,6 @@ END send_to_backend_sync;
                || '"attributes":'
                || l_attrs_json
                || '}';
-
-           cent_dbg_pkg.dbg_log('PLTELEMETRY', 'LOG_METRIC 010 l_json['||l_json||']'); -- ##MDEBUG
 
            -- Validate JSON
            IF l_json IS NOT JSON
@@ -1984,6 +1980,265 @@ END send_to_backend_sync;
     BEGIN
         send_log_internal(NULL, NULL, p_level, p_message, p_attributes);
     END log_message;
+
+    FUNCTION continue_distributed_trace(
+        p_trace_id   VARCHAR2,
+        p_operation  VARCHAR2,
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2
+    IS
+        l_span_id    VARCHAR2(16);
+        l_error_msg  VARCHAR2(4000);
+        l_error_code NUMBER;
+    BEGIN
+        -- Validate input
+        IF p_trace_id IS NULL OR LENGTH(p_trace_id) != 32 THEN
+            RAISE_APPLICATION_ERROR(-20100, 'Invalid trace_id: must be 32 character hex string');
+        END IF;
+        
+        IF p_operation IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20101, 'Operation name is required');
+        END IF;
+        
+        -- Set the distributed trace context
+        g_current_trace_id := p_trace_id;
+        
+        -- Start a new span within the existing trace
+        l_span_id := start_span(
+            p_operation    => p_operation,
+            p_parent_span_id => NULL,  -- No parent, this is a new span in distributed trace
+            p_trace_id     => p_trace_id
+        );
+        
+        -- Add distributed tracing attributes
+        BEGIN
+            INSERT INTO plt_span_attributes (
+                span_id,
+                attribute_key,
+                attribute_value
+            ) VALUES (
+                l_span_id,
+                'trace.distributed',
+                'true'
+            );
+            
+            -- Add system identifier
+            INSERT INTO plt_span_attributes (
+                span_id,
+                attribute_key,
+                attribute_value
+            ) VALUES (
+                l_span_id,
+                'system.name',
+                'oracle-plsql'
+            );
+            
+            -- Add tenant if provided
+            IF p_tenant_id IS NOT NULL THEN
+                INSERT INTO plt_span_attributes (
+                    span_id,
+                    attribute_key,
+                    attribute_value
+                ) VALUES (
+                    l_span_id,
+                    'tenant.id',
+                    p_tenant_id
+                );
+            END IF;
+            
+            -- Add database context
+            INSERT INTO plt_span_attributes (
+                span_id,
+                attribute_key,
+                attribute_value
+            ) VALUES (
+                l_span_id,
+                'db.name',
+                SYS_CONTEXT('USERENV', 'DB_NAME')
+            );
+            
+            INSERT INTO plt_span_attributes (
+                span_id,
+                attribute_key,
+                attribute_value
+            ) VALUES (
+                l_span_id,
+                'db.user',
+                SYS_CONTEXT('USERENV', 'SESSION_USER')
+            );
+            
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
+            
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Don't fail the main operation if attributes fail
+                l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+                
+                BEGIN
+                    INSERT INTO plt_telemetry_errors (
+                        error_time,
+                        error_message,
+                        module_name,
+                        trace_id,
+                        span_id
+                    ) VALUES (
+                        SYSTIMESTAMP,
+                        'Failed to add distributed trace attributes: ' || l_error_msg,
+                        'continue_distributed_trace',
+                        p_trace_id,
+                        l_span_id
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        NULL; -- Give up on error logging
+                END;
+        END;
+        
+        -- Log the continuation
+        DECLARE
+            l_attrs t_attributes;
+        BEGIN
+            l_attrs(1) := add_attribute('trace.source', 'external');
+            l_attrs(2) := add_attribute('system.previous', 'oracle-forms');
+            l_attrs(3) := add_attribute('tenant.id', NVL(p_tenant_id, 'default'));
+            
+            add_event(l_span_id, 'distributed_trace_continued', l_attrs);
+        END;
+        
+        RETURN l_span_id;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(SQLERRM, 1, 4000);
+            l_error_code := SQLCODE;
+            
+            -- Log error but return a span anyway to keep telemetry flowing
+            BEGIN
+                INSERT INTO plt_telemetry_errors (
+                    error_time,
+                    error_message,
+                    error_code,
+                    module_name,
+                    trace_id
+                ) VALUES (
+                    SYSTIMESTAMP,
+                    'continue_distributed_trace failed: ' || l_error_msg,
+                    l_error_code,
+                    'continue_distributed_trace',
+                    p_trace_id
+                );
+                
+                IF g_autocommit THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL;
+            END;
+            
+            -- Still try to create a basic span
+            BEGIN
+                l_span_id := generate_span_id();
+                g_current_trace_id := p_trace_id;
+                g_current_span_id := l_span_id;
+                RETURN l_span_id;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    RETURN 'error_span_' || TO_CHAR(SYSDATE, 'YYYYMMDDHH24MISS');
+            END;
+    END continue_distributed_trace;
+
+    FUNCTION get_trace_context
+    RETURN VARCHAR2
+    IS
+        l_context VARCHAR2(1000);
+    BEGIN
+        -- Build JSON context for external systems
+        l_context := '{'
+            || '"trace_id":"' || NVL(g_current_trace_id, '') || '",'
+            || '"span_id":"' || NVL(g_current_span_id, '') || '",'
+            || '"system":"oracle-plsql",'
+            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
+            || '"db_name":"' || SYS_CONTEXT('USERENV', 'DB_NAME') || '"';
+        
+        -- Add tenant if configured (check for tenant in current span attributes)
+        DECLARE
+            l_tenant_id VARCHAR2(100);
+        BEGIN
+            SELECT attribute_value
+            INTO l_tenant_id
+            FROM plt_span_attributes
+            WHERE span_id = g_current_span_id
+              AND attribute_key = 'tenant.id'
+              AND ROWNUM = 1;
+            
+            l_context := l_context || ',"tenant_id":"' || l_tenant_id || '"';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                NULL; -- No tenant configured
+            WHEN OTHERS THEN
+                NULL; -- Don't fail on tenant lookup
+        END;
+        
+        l_context := l_context || '}';
+        
+        RETURN l_context;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Return minimal context on error
+            RETURN '{"trace_id":"' || NVL(g_current_trace_id, 'error') || 
+                   '","system":"oracle-plsql","error":"context_failed"}';
+    END get_trace_context;
+
+    PROCEDURE log_distributed(
+        p_trace_id   VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_system     VARCHAR2 DEFAULT 'PLSQL',
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_attributes t_attributes;
+        l_idx        NUMBER := 1;
+    BEGIN
+        -- Build distributed logging attributes
+        l_attributes(l_idx) := add_attribute('system.name', p_system);
+        l_idx := l_idx + 1;
+        
+        l_attributes(l_idx) := add_attribute('trace.distributed', 'true');
+        l_idx := l_idx + 1;
+        
+        l_attributes(l_idx) := add_attribute('db.name', SYS_CONTEXT('USERENV', 'DB_NAME'));
+        l_idx := l_idx + 1;
+        
+        l_attributes(l_idx) := add_attribute('db.user', SYS_CONTEXT('USERENV', 'SESSION_USER'));
+        l_idx := l_idx + 1;
+        
+        IF p_tenant_id IS NOT NULL THEN
+            l_attributes(l_idx) := add_attribute('tenant.id', p_tenant_id);
+        END IF;
+        
+        -- Use existing log_with_trace functionality
+        log_with_trace(p_trace_id, p_level, p_message, l_attributes);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Fallback to basic logging
+            BEGIN
+                log_message(p_level, 'DISTRIBUTED: ' || p_message);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Never fail on logging
+            END;
+    END log_distributed;
+
 
 END PLTelemetry;
 /

@@ -43,6 +43,12 @@ AS
 
     PROCEDURE set_debug_mode (p_enabled BOOLEAN);
 
+    FUNCTION convert_attributes_legacy (p_attrs_json VARCHAR2)
+        RETURN CLOB;
+
+    FUNCTION convert_attributes_to_otlp_enhanced (p_attrs_json VARCHAR2)
+        RETURN CLOB;
+
     /**
      * Direct send procedures (for testing)
      */

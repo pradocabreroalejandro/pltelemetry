@@ -290,5 +290,53 @@ AS
      * @param p_attributes Optional attributes for the log
      */
     PROCEDURE log_message (p_level VARCHAR2, p_message VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
+    
+         /**
+     * Continue an existing trace from an external system
+     * Use this when receiving a trace_id from Forms or other systems
+     *
+     * @param p_trace_id The trace ID from the external system (Forms, etc.)
+     * @param p_operation The operation name for this part of the trace
+     * @param p_tenant_id Optional tenant identifier for multi-tenancy
+     * @return The span ID for this operation
+     * @example
+     *   l_span_id := PLTelemetry.continue_distributed_trace('abc123...', 'process_order_db', 'tenant_001');
+     */
+    FUNCTION continue_distributed_trace(
+        p_trace_id   VARCHAR2,
+        p_operation  VARCHAR2,
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2;
+
+    /**
+     * Get trace context for passing to external systems
+     * Returns JSON with trace_id, span_id, and tenant info
+     *
+     * @return JSON string with trace context
+     * @example
+     *   l_context := PLTelemetry.get_trace_context();
+     *   -- Returns: {"trace_id":"abc123...", "span_id":"def456...", "tenant_id":"tenant_001"}
+     */
+    FUNCTION get_trace_context
+    RETURN VARCHAR2;
+
+    /**
+     * Log with distributed trace context
+     * Use this for logging that should be correlated across systems
+     *
+     * @param p_trace_id The distributed trace ID
+     * @param p_level Log level
+     * @param p_message Log message
+     * @param p_system Source system identifier (Forms, PLSQL, etc.)
+     * @param p_tenant_id Optional tenant identifier
+     */
+    PROCEDURE log_distributed(
+        p_trace_id   VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_system     VARCHAR2 DEFAULT 'PLSQL',
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    );
+    
 END PLTelemetry;
 /

@@ -56,6 +56,9 @@ CREATE INDEX idx_plt_logs_trace_id ON plt_logs(trace_id);
 CREATE INDEX idx_plt_logs_span_id ON plt_logs(span_id);
 CREATE INDEX idx_plt_logs_timestamp ON plt_logs(timestamp);
 
+CREATE INDEX plt_span_attr_span_idx ON plt_span_attributes(span_id);
+CREATE INDEX plt_span_attr_key_idx ON plt_span_attributes(attribute_key);
+
 -- Composite indexes for common query patterns
 CREATE INDEX idx_plt_trace_span_lookup ON plt_spans(trace_id, span_id);
 CREATE INDEX idx_plt_active_spans ON plt_spans(trace_id, end_time) WHERE end_time IS NULL;
