@@ -13,6 +13,22 @@ PLTelemetry brings distributed tracing, metrics, and structured logging to Oracl
 ![Status](https://img.shields.io/badge/status-production%20ready-green.svg)
 ![Oracle Forms](https://img.shields.io/badge/Oracle%20Forms-supported-orange.svg)
 ![Distributed Tracing](https://img.shields.io/badge/distributed%20tracing-ready-green.svg)
+![Not affiliated with Oracle](https://img.shields.io/badge/affiliation-independent-blueviolet?logo=oracle&logoColor=white)
+
+
+## Legal Disclaimer
+
+**PLTelemetry** is an independent, community-driven project created and maintained by **Alejandro Prado Cabrero**.  
+
+It is **not affiliated with, endorsed by, or officially supported by Oracle Corporation** in any form.  
+References to Oracle® products (including Oracle Database, Oracle Forms, and Oracle Reports) are used **solely for integration and compatibility purposes**.  
+
+Oracle and all related marks are **registered trademarks of Oracle Corporation**. All other trademarks mentioned belong to their respective owners.  
+
+The author is **not an Oracle employee, partner, or representative**, and this software does **not contain any proprietary or confidential Oracle code**.  
+
+This project is provided “**as is**”, without any warranty. Use at your own discretion and risk, especially in production environments.
+
 
 ## What It Does
 

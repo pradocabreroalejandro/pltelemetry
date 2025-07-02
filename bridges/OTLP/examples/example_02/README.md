@@ -5,15 +5,15 @@
 A production-ready Oracle PL/SQL package that provides automated service health monitoring with intelligent escalation policies, real-time metrics export, and seamless integration with modern observability platforms.
 
 <p align="center">
-  <img src="assets/service_monitor_01.png" alt="PLTelemetry logo" width="200"/>
+  <img src="assets/service_monitor_01.png" alt="PLTelemetry logo" width="600"/>
 </p>
 
 <p align="center">
-  <img src="assets/service_monitor_02.png" alt="PLTelemetry logo" width="200"/>
+  <img src="assets/service_monitor_02.png" alt="PLTelemetry logo" width="600"/>
 </p>
 
 <p align="center">
-  <img src="assets/service_monitor_03.png" alt="PLTelemetry logo" width="200"/>
+  <img src="assets/service_monitor_03.png" alt="PLTelemetry logo" width="600"/>
 </p>
 
 ## Overview
