@@ -1,0 +1,82 @@
+#version: '3.8'
+
+services:
+  # Oracle Reports Service
+  oracle-reports:
+    build: .
+    ports:
+      - "8001:8001"
+    environment:
+      - SERVICE_NAME=oracle-reports
+      - SERVICE_PORT=8001
+    command: npm run start:reports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # WebLogic ERP Service  
+  weblogic-erp:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      - SERVICE_NAME=weblogic-erp
+      - SERVICE_PORT=8002
+    command: npm run start:weblogic
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Email Service
+  email-service:
+    build: .
+    ports:
+      - "8003:8003"
+    environment:
+      - SERVICE_NAME=email-service
+      - SERVICE_PORT=8003
+    command: npm run start:email
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Batch Processing Service
+  batch-processor:
+    build: .
+    ports:
+      - "8004:8004"
+    environment:
+      - SERVICE_NAME=batch-processor
+      - SERVICE_PORT=8004
+    command: npm run start:batch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Document Generation Service
+  document-service:
+    build: .
+    ports:
+      - "8005:8005"
+    environment:
+      - SERVICE_NAME=document-service
+      - SERVICE_PORT=8005
+    command: npm run start:documents
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

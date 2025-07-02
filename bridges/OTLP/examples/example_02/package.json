@@ -1,0 +1,25 @@
+{
+  "name": "pltelemetry-legacy-services-mock",
+  "version": "1.0.0",
+  "description": "Mock legacy services for PLTelemetry heartbeat and error handling examples",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:reports": "node services/oracle-reports.js",
+    "start:weblogic": "node services/weblogic-erp.js", 
+    "start:email": "node services/email-service.js",
+    "start:batch": "node services/batch-processor.js",
+    "start:documents": "node services/document-service.js",
+    "start:all": "concurrently \"npm run start:reports\" \"npm run start:weblogic\" \"npm run start:email\" \"npm run start:batch\" \"npm run start:documents\"",
+    "dev": "npm run start:all"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "concurrently": "^8.2.0",
+    "uuid": "^9.0.0"
+  },
+  "keywords": ["pltelemetry", "oracle", "mock", "heartbeat", "observability"],
+  "author": "PLTelemetry Team",
+  "license": "MIT"
+}

@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  oracle-ee:
+    image: container-registry.oracle.com/database/enterprise:21.3.0.0
+    container_name: oracle-ee
+    ports:
+      - "1521:1521"    # Oracle Listener
+      - "5500:5500"    # Enterprise Manager Express
+    environment:
+      - ORACLE_SID=ORCLCDB
+      - ORACLE_PDB=demo
+      - ORACLE_PWD=kurita18
+      - ORACLE_CHARACTERSET=AL32UTF8
+    volumes:
+      - oracle-ee-data:/opt/oracle/oradata
+    mem_limit: 6g
+    cpus: 2.0
+    restart: unless-stopped
+
+volumes:
+  oracle-ee-data:

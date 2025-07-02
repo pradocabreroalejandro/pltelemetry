@@ -35,6 +35,9 @@ AS
     /**
      * Configuration procedures
      */
+
+    PROCEDURE set_native_json_mode (p_enabled BOOLEAN);
+
     PROCEDURE set_otlp_collector (p_base_url VARCHAR2);
 
     PROCEDURE set_service_info (p_service_name VARCHAR2, p_service_version VARCHAR2 DEFAULT NULL, p_tenant_id VARCHAR2 DEFAULT NULL);
