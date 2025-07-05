@@ -125,7 +125,7 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
         WHEN NO_DATA_FOUND THEN
             RAISE_APPLICATION_ERROR(-20001, 'Service not found: ' || p_service_name);
         WHEN OTHERS THEN
-            RAISE_APPLICATION_ERROR(-20002, 'Error loading service runtime: ' || SQLERRM);
+            RAISE_APPLICATION_ERROR(-20002, 'Error loading service runtime: ' || substr(SQLERRM, 1, 200));
     END load_service_runtime;
 
     /**
@@ -194,11 +194,11 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
         IF NOT g_telemetry_configured THEN
             -- Configure PLTelemetry for heartbeat monitoring
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
-            PLT_OTLP_BRIDGE.set_otlp_collector('http://192.168.100.116:4318');
+            PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
             PLT_OTLP_BRIDGE.set_service_info('oracle-heartbeat-monitor', '2.0.0', 'production');
             PLT_OTLP_BRIDGE.set_native_json_mode(TRUE);
             PLTelemetry.set_async_mode(FALSE);
-            PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
+            PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
             
             g_telemetry_configured := TRUE;
         END IF;
@@ -312,7 +312,7 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
                     WHEN OTHERS THEN
                         -- JSON parsing failed, but HTTP was successful
                         l_result.status := C_HEALTHY;
-                        l_result.error_message := 'JSON parsing failed: ' || SQLERRM;
+                        l_result.error_message := 'JSON parsing failed: ' || substr(SQLERRM, 1, 200);
                 END;
             ELSE
                 -- Non-200 status code
@@ -329,13 +329,13 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
 
             WHEN UTL_HTTP.REQUEST_FAILED THEN
                 l_result.status := C_DOWN;
-                l_result.error_message := 'Service unreachable: ' || SQLERRM;
+                l_result.error_message := 'Service unreachable: ' || substr(SQLERRM, 1, 200);
                 l_result.response_time_ms := -1; -- FIXED: Use -1 for unreachable instead of 99999
                 PLTelemetry.add_event(l_span_id, 'service_unreachable');
 
             WHEN OTHERS THEN
                 l_result.status := C_ERROR;
-                l_result.error_message := 'Health check error: ' || SQLERRM;
+                l_result.error_message := 'Health check error: ' || substr(SQLERRM, 1, 200);
                 l_result.response_time_ms := -1; -- FIXED: Use -1 for errors instead of 99999
                 PLTelemetry.add_event(l_span_id, 'health_check_error');
         END;
@@ -446,7 +446,7 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
     EXCEPTION
         WHEN OTHERS THEN
             l_result.status := C_ERROR;
-            l_result.error_message := 'Critical health check failure: ' || SQLERRM;
+            l_result.error_message := 'Critical health check failure: ' || substr(SQLERRM, 1, 200);
             l_result.response_time_ms := -1; -- FIXED: Use -1 for critical failures instead of 99999
             
             -- =================================================================
@@ -494,13 +494,13 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
             END;
             
             l_attrs := PLTelemetry.t_attributes();
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
+            l_attrs(1) := PLTelemetry.add_attribute('error.message', substr(SQLERRM, 1, 200));
             l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
             
             PLTelemetry.log_distributed(
                 p_trace_id => l_trace_id,
                 p_level => 'ERROR',
-                p_message => 'Health check critical failure for ' || p_service_name || ': ' || SQLERRM,
+                p_message => 'Health check critical failure for ' || p_service_name || ': ' || substr(SQLERRM, 1, 200),
                 p_system => 'HEARTBEAT_MONITOR'
             );
 
@@ -636,7 +636,7 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
             PLTelemetry.log_distributed(
                 p_trace_id => PLTelemetry.get_current_trace_id(),
                 p_level => 'ERROR',
-                p_message => 'Failed to handle service failure for ' || p_service_name || ': ' || SQLERRM,
+                p_message => 'Failed to handle service failure for ' || p_service_name || ': ' || substr(SQLERRM, 1, 200),
                 p_system => 'HEARTBEAT_MONITOR'
             );
     END handle_service_failure;
@@ -741,7 +741,7 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
             PLTelemetry.log_distributed(
                 p_trace_id => PLTelemetry.get_current_trace_id(),
                 p_level => 'ERROR',
-                p_message => 'Failed to handle service recovery for ' || p_service_name || ': ' || SQLERRM,
+                p_message => 'Failed to handle service recovery for ' || p_service_name || ': ' || substr(SQLERRM, 1, 200),
                 p_system => 'HEARTBEAT_MONITOR'
             );
     END handle_service_recovery;
@@ -870,13 +870,13 @@ CREATE OR REPLACE PACKAGE BODY HEARTBEAT_MONITOR AS
             END IF;
 
             l_attrs := PLTelemetry.t_attributes();
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
+            l_attrs(1) := PLTelemetry.add_attribute('error.message', substr(SQLERRM, 1, 200));
             l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
             
             PLTelemetry.log_distributed(
                 p_trace_id => l_trace_id,
                 p_level => 'ERROR',
-                p_message => 'Heartbeat monitoring cycle failed: ' || SQLERRM,
+                p_message => 'Heartbeat monitoring cycle failed: ' || substr(SQLERRM, 1, 200),
                 p_system => 'HEARTBEAT_MONITOR'
             );
 

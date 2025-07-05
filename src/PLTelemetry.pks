@@ -1,9 +1,10 @@
 CREATE OR REPLACE PACKAGE PLTelemetry
 AS
     -- OpenTelemetry SDK for PL/SQL
-    -- Version: 0.1
+    -- Version: 0.2
     -- Description: Provides distributed tracing capabilities for PL/SQL applications
     --              following OpenTelemetry standards
+    -- Requirements: Oracle 12c+ (native JSON support required)
 
     --------------------------------------------------------------------------
     -- TYPE DEFINITIONS
@@ -47,15 +48,25 @@ AS
     g_current_span_id               VARCHAR2 (16);
 
     -- Configuration parameters
-    g_autocommit                    BOOLEAN := FALSE;                                                                  -- Control auto-commit behavior
+    g_autocommit                    BOOLEAN := FALSE;
     g_backend_url                   VARCHAR2 (500) := 'http://your-backend:3000/plsql-otel/telemetry';
-    g_backend_timeout               NUMBER := 30;                                                                                -- Timeout in seconds
-    g_api_key                       VARCHAR2 (100) := 'your-secret-api-key';                                             -- API key for authentication
-    g_async_mode                    BOOLEAN := TRUE;                                                                        -- Enable async by default
+    g_backend_timeout               NUMBER := 30;
+    g_api_key                       VARCHAR2 (100) := 'your-secret-api-key';
+    g_async_mode                    BOOLEAN := TRUE;
 
     --------------------------------------------------------------------------
     -- CORE TRACING FUNCTIONS
     --------------------------------------------------------------------------
+
+    /**
+     * Generates a 128-bit trace ID following OpenTelemetry spec
+     *
+     * @return 32 character hex string trace ID
+     * @example
+     *   l_trace_id := PLTelemetry.generate_trace_id();
+     */
+    FUNCTION generate_trace_id
+       RETURN VARCHAR2;
 
     /**
      * Starts a new trace with the given operation name
@@ -69,10 +80,10 @@ AS
         RETURN VARCHAR2;
 
     /**
-      * Ends the current trace and clears context
-      *
-      * @param p_trace_id Optional trace ID to end (uses current if not provided)
-      */
+     * Ends the current trace and clears context
+     *
+     * @param p_trace_id Optional trace ID to end (uses current if not provided)
+     */
     PROCEDURE end_trace (p_trace_id VARCHAR2 DEFAULT NULL);
 
     /**
@@ -142,7 +153,7 @@ AS
         RETURN VARCHAR2;
 
     /**
-     * Converts an attributes collection to JSON format
+     * Converts an attributes collection to JSON format using native Oracle JSON
      *
      * @param p_attributes Collection of key=value attributes
      * @return JSON string representation of attributes
@@ -253,6 +264,10 @@ AS
     FUNCTION get_current_span_id
         RETURN VARCHAR2;
 
+    --------------------------------------------------------------------------
+    -- LOGGING FUNCTIONS
+    --------------------------------------------------------------------------
+
     /**
      * Logs with explicit trace context (cross-system correlation)
      * Use when you receive trace_id from external systems (Angular, etc.)
@@ -290,8 +305,12 @@ AS
      * @param p_attributes Optional attributes for the log
      */
     PROCEDURE log_message (p_level VARCHAR2, p_message VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
-    
-         /**
+
+    --------------------------------------------------------------------------
+    -- DISTRIBUTED TRACING FUNCTIONS
+    --------------------------------------------------------------------------
+
+    /**
      * Continue an existing trace from an external system
      * Use this when receiving a trace_id from Forms or other systems
      *
@@ -337,6 +356,39 @@ AS
         p_system     VARCHAR2 DEFAULT 'PLSQL',
         p_tenant_id  VARCHAR2 DEFAULT NULL
     );
-    
+
+    --------------------------------------------------------------------------
+    -- JSON UTILITY FUNCTIONS (Native Oracle 12c+ only)
+    --------------------------------------------------------------------------
+
+    /**
+     * Extract value from JSON using native Oracle JSON functions
+     *
+     * @param p_json JSON string
+     * @param p_key Key to extract
+     * @return Value as VARCHAR2
+     */
+    FUNCTION get_json_value (p_json VARCHAR2, p_key VARCHAR2)
+        RETURN VARCHAR2;
+
+    /**
+     * Extract JSON object from JSON using native Oracle JSON functions
+     *
+     * @param p_json JSON string
+     * @param p_key Key to extract
+     * @return JSON object as VARCHAR2
+     */
+    FUNCTION get_json_object (p_json VARCHAR2, p_key VARCHAR2)
+        RETURN VARCHAR2;
+
+    /**
+     * Validate attribute key follows OpenTelemetry naming conventions
+     *
+     * @param p_key Attribute key to validate
+     * @return TRUE if valid, FALSE otherwise
+     */
+    FUNCTION validate_attribute_key(p_key VARCHAR2) 
+        RETURN BOOLEAN;
+
 END PLTelemetry;
 /

@@ -145,12 +145,12 @@ END;
 ### Collector Configuration
 ```sql
 -- Basic collector setup
-PLT_OTLP_BRIDGE.set_otlp_collector('http://localhost:4318');
+PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
 
 -- Individual endpoint configuration
-PLT_OTLP_BRIDGE.set_traces_endpoint('http://collector:4318/v1/traces');
-PLT_OTLP_BRIDGE.set_metrics_endpoint('http://collector:4318/v1/metrics');
-PLT_OTLP_BRIDGE.set_logs_endpoint('http://collector:4318/v1/logs');
+PLT_OTLP_BRIDGE.set_traces_endpoint('http://plt-otel-collector:4318/v1/traces');
+PLT_OTLP_BRIDGE.set_metrics_endpoint('http://plt-otel-collector:4318/v1/metrics');
+PLT_OTLP_BRIDGE.set_logs_endpoint('http://plt-otel-collector:4318/v1/logs');
 ```
 
 ### Service Identification

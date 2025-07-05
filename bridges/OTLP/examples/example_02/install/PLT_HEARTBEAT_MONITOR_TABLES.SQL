@@ -1,4 +1,4 @@
-drop table heartbeat_services;
+--drop table heartbeat_services;
 
 CREATE TABLE heartbeat_criticality_levels (
     criticality_code VARCHAR2(10) PRIMARY KEY,

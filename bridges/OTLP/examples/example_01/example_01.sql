@@ -108,22 +108,28 @@ CREATE OR REPLACE PACKAGE BODY API_PRICING AS
         
     EXCEPTION
         WHEN OTHERS THEN
+            -- Log error details to DBMS_OUTPUT for debugging
+            DBMS_OUTPUT.PUT_LINE('=== ERROR STACK ===');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.FORMAT_ERROR_STACK);
+            DBMS_OUTPUT.PUT_LINE('=== ERROR BACKTRACE ===');
+            DBMS_OUTPUT.PUT_LINE(DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+
             -- Handle pricing errors with full tracing context
             l_attrs := PLTelemetry.t_attributes();
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
+            l_attrs(1) := PLTelemetry.add_attribute('error.message', substr(SQLERRM, 1, 200));
             l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
             l_attrs(3) := PLTelemetry.add_attribute('customer.id', TO_CHAR(p_customer_id));
             
             PLTelemetry.log_distributed(
                 p_trace_id => p_trace_id,
                 p_level => 'ERROR',
-                p_message => 'Pricing calculation failed: ' || SQLERRM,
+                p_message => 'Pricing calculation failed: ' || substr(SQLERRM, 1, 200),
                 p_system => 'PRICING_ENGINE'
             );
             
             PLTelemetry.end_span(l_span_id, 'ERROR', l_attrs);
             
-            RETURN 'ERROR: ' || SQLERRM;
+            RETURN 'ERROR: ' || substr(SQLERRM, 1, 200);
     END calculate_prices;
     
 END API_PRICING;
@@ -263,7 +269,7 @@ CREATE OR REPLACE PACKAGE BODY API_INVOICE AS
         WHEN OTHERS THEN
             -- Handle invoice creation errors with full context
             l_attrs := PLTelemetry.t_attributes();
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
+            l_attrs(1) := PLTelemetry.add_attribute('error.message', substr(SQLERRM, 1, 200));
             l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
             l_attrs(3) := PLTelemetry.add_attribute('customer.id', TO_CHAR(p_customer_id));
             l_attrs(4) := PLTelemetry.add_attribute('invoice.amount', TO_CHAR(p_amount));
@@ -271,13 +277,13 @@ CREATE OR REPLACE PACKAGE BODY API_INVOICE AS
             PLTelemetry.log_distributed(
                 p_trace_id => p_trace_id,
                 p_level => 'ERROR',
-                p_message => 'Invoice creation failed: ' || SQLERRM,
+                p_message => 'Invoice creation failed: ' || substr(SQLERRM, 1, 200),
                 p_system => 'INVOICE_ENGINE'
             );
             
             PLTelemetry.end_span(l_span_id, 'ERROR', l_attrs);
             
-            RETURN '{"status":"ERROR","message":"' || REPLACE(SQLERRM, '"', '\"') || '"}';
+            RETURN '{"status":"ERROR","message":"' || REPLACE(substr(SQLERRM, 1, 200), '"', '\"') || '"}';
     END create_invoice;
     
 END API_INVOICE;
@@ -316,14 +322,15 @@ BEGIN
     -- STEP 0: Configure PLTelemetry (should be done once per session)
     -- ========================================================================
     BEGIN
-        PLTelemetry.set_backend_url('OTLP_BRIDGE');
-        PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
-        PLT_OTLP_BRIDGE.set_service_info('oracle-forms-erp', '2.1.0', 'production');
-        PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
+        null; -- Placeholder for any session initialization logic
+        --PLTelemetry.set_backend_url('OTLP_BRIDGE');
+        --PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
+        --PLT_OTLP_BRIDGE.set_service_info('oracle-forms-erp', '2.1.0', 'production');
+        PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
         PLTelemetry.set_async_mode(FALSE); -- Immediate sending for demo
     EXCEPTION
         WHEN OTHERS THEN
-            DBMS_OUTPUT.PUT_LINE('Warning: PLTelemetry configuration failed - ' || SQLERRM);
+            DBMS_OUTPUT.PUT_LINE('Warning: PLTelemetry configuration failed - ' || substr(SQLERRM, 1, 200));
     END;
     
     -- ========================================================================
@@ -543,7 +550,7 @@ EXCEPTION
     WHEN OTHERS THEN
         -- Global error handler with full tracing context
         l_attrs := PLTelemetry.t_attributes();
-        l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
+        l_attrs(1) := PLTelemetry.add_attribute('error.message', substr(SQLERRM, 1, 200));
         l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
         l_attrs(3) := PLTelemetry.add_attribute('workflow.status', 'failed');
         l_attrs(4) := PLTelemetry.add_attribute('customer.id', TO_CHAR(l_customer_id));
@@ -551,7 +558,7 @@ EXCEPTION
         PLTelemetry.log_distributed(
             p_trace_id => l_trace_id,
             p_level => 'ERROR',
-            p_message => 'Invoice workflow failed: ' || SQLERRM,
+            p_message => 'Invoice workflow failed: ' || substr(SQLERRM, 1, 200),
             p_system => 'ORACLE_FORMS'
         );
         
@@ -560,7 +567,7 @@ EXCEPTION
         PLTelemetry.end_trace(l_trace_id);
         
         DBMS_OUTPUT.PUT_LINE('=== Invoice Creation Workflow FAILED ===');
-        DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+        DBMS_OUTPUT.PUT_LINE('Error: ' || substr(SQLERRM, 1, 200));
         DBMS_OUTPUT.PUT_LINE('Trace ID: ' || l_trace_id);
         
         -- Re-raise the error so Forms can handle it appropriately
@@ -578,7 +585,7 @@ END FORM_KEY_COMMIT;
 -- 1. First ensure PLTelemetry is properly configured
 BEGIN
     PLTelemetry.set_backend_url('OTLP_BRIDGE');
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
+    PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
     PLT_OTLP_BRIDGE.set_service_info('oracle-forms-erp', '2.1.0');
 END;
 /

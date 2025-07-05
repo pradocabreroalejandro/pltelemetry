@@ -77,7 +77,7 @@ INSERT INTO heartbeat_services (
 ) VALUES (
     'oracle-reports',
     'Oracle Reports Server - Critical reporting infrastructure',
-    'http://192.168.100.116:8001',
+    'http://localhost:8001',
     'HIGH',
     10,
     1
@@ -94,7 +94,7 @@ INSERT INTO heartbeat_services (
 ) VALUES (
     'weblogic-erp',
     'WebLogic ERP System - Core business operations',
-    'http://192.168.100.116:8002',
+    'http://localhost:8002',
     'HIGH',
     15,
     1
@@ -128,7 +128,7 @@ INSERT INTO heartbeat_services (
 ) VALUES (
     'batch-processor',
     'Batch Processing Service - Daily background operations',
-    'http://192.168.100.116:8004',
+    'http://localhost:8004',
     'LOW',
     12,
     1
@@ -145,7 +145,7 @@ INSERT INTO heartbeat_services (
 ) VALUES (
     'document-service',
     'Document Generation Service - Non-critical document processing',
-    'http://192.168.100.116:8005',
+    'http://localhost:8005',
     'VERY_LOW',
     20,
     1

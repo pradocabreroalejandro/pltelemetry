@@ -9,9 +9,9 @@ AS
      */
 
     -- Configuration
-    g_traces_endpoint    VARCHAR2 (500) := 'http://localhost:4318/v1/traces';
-    g_metrics_endpoint   VARCHAR2 (500) := 'http://localhost:4318/v1/metrics';
-    g_logs_endpoint      VARCHAR2 (500) := 'http://localhost:4318/v1/logs';
+    g_traces_endpoint    VARCHAR2 (500) := 'http://plt-otel-collector:4318/v1/traces';
+    g_metrics_endpoint   VARCHAR2 (500) := 'http://plt-otel-collector:4318/v1/metrics';
+    g_logs_endpoint      VARCHAR2 (500) := 'http://plt-otel-collector:4318/v1/logs';
     g_timeout            NUMBER := 30;
 
     -- Service identification
@@ -31,6 +31,12 @@ AS
      * Main router - called by PLTelemetry when backend_url = 'OTLP_BRIDGE'
      */
     PROCEDURE route_to_otlp (p_json VARCHAR2);
+
+    PROCEDURE set_traces_endpoint (p_url VARCHAR2);
+
+    PROCEDURE set_metrics_endpoint (p_url VARCHAR2);
+
+    PROCEDURE set_logs_endpoint (p_url VARCHAR2);
 
     /**
      * Configuration procedures
