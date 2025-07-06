@@ -463,8 +463,5 @@ else
     echo "   - Check if metrics 'pltelemetry_service_status_gauge' exist in Prometheus"
     echo "   - Verify Prometheus datasource is configured in Grafana"
     echo "   - Ensure metrics are being scraped from OTEL collector"
-<<<<<<< HEAD
 fi
-=======
-fi
->>>>>>> origin
+

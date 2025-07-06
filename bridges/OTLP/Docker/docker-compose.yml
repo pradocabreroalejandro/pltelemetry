@@ -1,19 +1,21 @@
 # =============================================================================
-# PLTelemetry Demo Stack - Grafana + OTEL Collector
+# PLTelemetry Demo Stack - Grafana + OTEL Collector + EMAIL ALERTS
 # =============================================================================
-# 
+#
 # Simple setup for demos - NO SECURITY, just functionality
-# 
+#
 # Stack includes:
 # - OTEL Collector (receives PLTelemetry data)
-# - Grafana (dashboards and visualization)
+# - Grafana (dashboards and visualization) + EMAIL ALERTS 🚨
 # - Tempo (distributed tracing backend)
 # - Loki (log aggregation)
 # - Prometheus (metrics storage)
+# - MailHog (SMTP testing server)
 #
 # Usage:
 #   docker-compose up -d
 #   Open http://localhost:3020 (admin/admin)
+#   Open http://localhost:8025 (MailHog - see emails)
 #   Configure your PLTelemetry to send to http://localhost:4318
 #
 # =============================================================================
@@ -101,7 +103,7 @@ services:
     restart: unless-stopped
 
   # =============================================================================
-  # GRAFANA - Visualization and dashboards
+  # GRAFANA - Visualization and dashboards + EMAIL ALERTS 🚨
   # =============================================================================
   grafana:
     image: grafana/grafana:latest
@@ -114,6 +116,12 @@ services:
       - GF_ANALYTICS_CHECK_FOR_UPDATES=false
       # Auto-provision datasources and dashboards
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      # 🚨 SMTP CONFIGURATION FOR EMAIL ALERTS 🚨
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=mailhog:1025
+      - GF_SMTP_SKIP_VERIFY=true
+      - GF_SMTP_FROM_ADDRESS=pltelemetry@grafana.local
+      - GF_SMTP_FROM_NAME=PLTelemetry Alerts
     volumes:
       - grafana-data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -124,6 +132,20 @@ services:
       - tempo
       - loki
       - prometheus
+      - mailhog  # 🚨 NEW DEPENDENCY
+    networks:
+      - plt-demo
+    restart: unless-stopped
+
+  # =============================================================================
+  # MAILHOG - Email Testing Server 📧
+  # =============================================================================
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: plt-mailhog
+    ports:
+      - "1025:1025"   # SMTP port (for Grafana)
+      - "8025:8025"   # Web UI port (to see emails)
     networks:
       - plt-demo
     restart: unless-stopped
