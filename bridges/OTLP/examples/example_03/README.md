@@ -22,7 +22,7 @@ A production-ready Oracle PL/SQL package that seamlessly connects [PLTelemetry](
 </p>
 
 <p align="center">
-  <img src="assets/example_04_03.png" alt="PLTelemetry logo" width="600"/>
+  <img src="assets/example_03_04.png" alt="PLTelemetry logo" width="600"/>
 </p>
 
 ## 🎯 What It Does
