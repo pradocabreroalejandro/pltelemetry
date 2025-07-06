@@ -1,17 +1,33 @@
 #!/bin/bash
 # =============================================================================
-# PLTelemetry Service Status Dashboard - CLEAN & SIMPLE + Response Time
+# PLTelemetry Service Status Dashboard - Import Script
+# 
+# Usage: ./import_dashboard.sh <grafana_password>
+# Example: ./import_dashboard.sh mySecretPassword123
 # =============================================================================
-GRAFANA_URL="http://localhost:3000"
-GRAFANA_USER="admin"
-GRAFANA_PASS="Kurita2021@"
 
-echo "🎯 Importando PLTelemetry Service Status Dashboard..."
+# Check if password parameter was provided
+if [ $# -eq 0 ]; then
+    echo "❌ Error: Grafana password required"
+    echo ""
+    echo "Usage: $0 <grafana_password>"
+    echo "Example: $0 mySecretPassword123"
+    echo ""
+    echo "🔒 Security note: Password is passed as parameter to avoid hardcoding"
+    exit 1
+fi
+
+GRAFANA_URL="http://localhost:3020"
+GRAFANA_USER="admin"
+GRAFANA_PASS="$1"
+
+echo "🎯 Importing PLTelemetry Service Status Dashboard..."
+echo "🔐 Using provided password for user: $GRAFANA_USER"
 echo "=================================================="
-echo "📋 Tabla dinámica con servicios automáticos"
-echo "🟢 Up/Down status con colores"
-echo "⏱️ Response times incluidos"
-echo "🔄 Auto-refresh cada 30s"
+echo "📋 Dynamic table with automatic services"
+echo "🟢 Up/Down status with colors"
+echo "⏱️ Response times included"
+echo "🔄 Auto-refresh every 30s"
 echo ""
 
 # Function to make Grafana API calls
@@ -33,6 +49,23 @@ grafana_api() {
             "$GRAFANA_URL/api/$endpoint"
     fi
 }
+
+# Test Grafana connection first
+echo "🔗 Testing Grafana connection..."
+TEST_RESULT=$(grafana_api "GET" "health")
+
+if echo "$TEST_RESULT" | grep -q "ok"; then
+    echo "✅ Grafana connection successful"
+else
+    echo "❌ Cannot connect to Grafana at $GRAFANA_URL"
+    echo "🔍 Please check:"
+    echo "   - Grafana is running on port 3020"
+    echo "   - Username/password are correct"
+    echo "   - URL is accessible"
+    echo ""
+    echo "Response: $TEST_RESULT"
+    exit 1
+fi
 
 # PLTelemetry Service Status Dashboard
 PLT_SERVICE_DASHBOARD='{
@@ -404,23 +437,30 @@ PLT_SERVICE_DASHBOARD='{
   "overwrite": true
 }'
 
-echo "📊 Importando dashboard..."
+echo "📊 Importing dashboard..."
 IMPORT_RESULT=$(grafana_api "POST" "dashboards/db" "$PLT_SERVICE_DASHBOARD")
 
 # Check if import was successful
 if echo "$IMPORT_RESULT" | grep -q "success"; then
+    DASHBOARD_UID=$(echo "$IMPORT_RESULT" | grep -o '"uid":"[^"]*"' | cut -d'"' -f4)
     echo ""
-    echo "🎉 ¡PLTelemetry Service Dashboard importado correctamente!"
+    echo "🎉 PLTelemetry Service Dashboard imported successfully!"
     echo "===================================================="
-    echo "📋 Tabla dinámica: ✅"
+    echo "📋 Dynamic table: ✅"
     echo "🔄 Auto-refresh 30s: ✅"
-    echo "🎨 Colores por estado: ✅"
-    echo "⏱️ Response times con colores: ✅"
-    echo "📈 Gráfica evolución (15min): ✅"
-    echo "📊 Queries: status + response_time_ms (filtrado > -1)"
+    echo "🎨 Status colors: ✅"
+    echo "⏱️ Response times with colors: ✅"
+    echo "📈 Evolution chart (15min): ✅"
+    echo "📊 Queries: status + response_time_ms (filtered > -1)"
     echo ""
-    echo "🌐 URL: $GRAFANA_URL/d/$(echo $IMPORT_RESULT | grep -o '"uid":"[^"]*"' | cut -d'"' -f4)"
+    echo "🌐 Dashboard URL: $GRAFANA_URL/d/$DASHBOARD_UID"
+    echo "📋 Dashboard UID: $DASHBOARD_UID"
 else
-    echo "❌ Error en la importación:"
+    echo "❌ Import error:"
     echo "$IMPORT_RESULT"
+    echo ""
+    echo "🔍 Common issues:"
+    echo "   - Check if metrics 'pltelemetry_service_status_gauge' exist in Prometheus"
+    echo "   - Verify Prometheus datasource is configured in Grafana"
+    echo "   - Ensure metrics are being scraped from OTEL collector"
 fi
