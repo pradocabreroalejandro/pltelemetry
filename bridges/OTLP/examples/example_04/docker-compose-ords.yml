@@ -1,0 +1,41 @@
+# =============================================================================
+# ORDS Standalone - Connect to existing Oracle container
+# =============================================================================
+
+services:
+  ords:
+    image: container-registry.oracle.com/database/ords:latest
+    container_name: ords-for-plt
+    ports:
+      - "8080:8080"
+    environment:
+      # Database connection to existing oracle-plt container
+      - ORDS_CONFIG_DIR=/etc/ords/config
+      # Method 1: Using individual variables (what ORDS expects)
+      - DBHOST=oracle-plt
+      - DBPORT=1521
+      - DBSERVICENAME=FREEPDB1
+      - ORACLE_PWD=plt
+      # Method 2: Using connection string (alternative)
+      - CONN_STRING=sys/plt@oracle-plt:1521/FREEPDB1
+      # Additional ORDS configuration
+      - APEX_PUBLIC_USER_PASSWORD=plt
+      - APEX_LISTENER_PASSWORD=plt
+      - APEX_REST_PASSWORD=plt
+      - PUBLIC_PASSWORD=plt
+    volumes:
+      - ords-config:/etc/ords/config
+    restart: unless-stopped
+    # REMOVED depends_on since oracle-plt is external
+    # Connect to the same network as oracle-plt
+    networks:
+      - oracle-project_oracle-net  # Use the network from your Oracle project
+
+networks:
+  # Reference to existing oracle network
+  oracle-project_oracle-net:
+    external: true
+
+volumes:
+  ords-config:
+    driver: local

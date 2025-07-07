@@ -1,0 +1,50 @@
+services:
+  oracle-ords:
+    image: container-registry.oracle.com/database/ords:latest
+    container_name: ords-for-plt
+    environment:
+      - ORDS_CONFIG_DIR=/etc/ords/config
+      - DBHOST=oracle-plt
+      - DBPORT=1521
+      - DBSERVICENAME=FREEPDB1
+      - ORACLE_PWD=plt
+      - CONN_STRING=sys/plt@oracle-plt:1521/FREEPDB1
+      - APEX_PUBLIC_USER_PASSWORD=plt
+      - APEX_LISTENER_PASSWORD=plt
+      - APEX_REST_PASSWORD=plt
+      - PUBLIC_PASSWORD=plt
+    volumes:
+      - ords-config:/etc/ords/config
+    ports:
+      - "8080:8080"
+    networks:
+      - oracle-project_oracle-net
+    restart: unless-stopped
+
+  financial-service:
+    build:
+      context: ./nodejs-service
+      dockerfile: Dockerfile
+    container_name: plt-financial-service
+    environment:
+      - NODE_ENV=production
+      - OTEL_SERVICE_NAME=financial-reports-api
+      - OTEL_SERVICE_VERSION=1.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+      - ORACLE_ORDS_URL=http://ords-for-plt:8080
+      - PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      - oracle-ords
+    networks:
+      - oracle-project_oracle-net
+    restart: unless-stopped
+
+volumes:
+  ords-config:
+    driver: local
+
+networks:
+  oracle-project_oracle-net:
+    external: true

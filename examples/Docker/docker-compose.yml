@@ -10,7 +10,7 @@ services:
     environment:
       - ORACLE_SID=ORCLCDB
       - ORACLE_PDB=demo
-      - ORACLE_PWD=kurita18
+      - ORACLE_PWD=your_password_here
       - ORACLE_CHARACTERSET=AL32UTF8
     volumes:
       - oracle-ee-data:/opt/oracle/oradata
