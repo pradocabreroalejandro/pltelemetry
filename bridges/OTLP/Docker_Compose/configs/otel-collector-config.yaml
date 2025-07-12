@@ -1,8 +1,7 @@
 # =============================================================================
-# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY
+# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - PLAN B FIXED
 # File: otel-collector-config.yaml
 # =============================================================================
-
 receivers:
   # HTTP receiver for PLTelemetry (Oracle PL/SQL)
   otlp:
@@ -16,7 +15,6 @@ receivers:
             - "*"
           allowed_headers:
             - "*"
-
   # Prometheus receiver for collector metrics
   prometheus:
     config:
@@ -32,23 +30,11 @@ processors:
     timeout: 1s
     send_batch_size: 1024
     send_batch_max_size: 2048
-
-  # Resource processor to add consistent labels
-  resource:
-    attributes:
-      - key: service.namespace
-        value: "pltelemetry-demo"
-        action: upsert
-      - key: deployment.environment
-        value: "demo"
-        action: upsert
-
   # Memory limiter to prevent OOM
   memory_limiter:
     limit_mib: 512
     spike_limit_mib: 128
     check_interval: 1s
-
   # Attributes processor for PLTelemetry specific handling
   attributes:
     actions:
@@ -70,24 +56,22 @@ exporters:
     endpoint: http://tempo:4317
     tls:
       insecure: true
-
   # Send logs to Loki
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-    
-  # Send metrics to Prometheus
+  # PLAN B: Classic Prometheus exporter (always works)
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "pltelemetry"
     const_labels:
       source: "oracle"
-
+    send_timestamps: true
+    metric_expiration: 180m
   # Debug output for development
   debug:
     verbosity: detailed
     sampling_initial: 5
     sampling_thereafter: 200
-
   # File export for backup/debugging
   file:
     path: /tmp/otel-output.json
@@ -97,19 +81,17 @@ service:
     # Traces pipeline
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, resource, batch]
+      processors: [memory_limiter, batch]
       exporters: [otlp/tempo, debug]
-
-    # Metrics pipeline  
+    # Metrics pipeline - FIXED TO USE CLASSIC PROMETHEUS EXPORTER
     metrics:
       receivers: [otlp, prometheus]
-      processors: [memory_limiter, resource, batch]
+      processors: [memory_limiter, batch]
       exporters: [prometheus, debug]
-
     # Logs pipeline
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, resource, attributes, batch]
+      processors: [memory_limiter, attributes, batch]
       exporters: [loki, debug]
 
-  extensions: []
+# FIXED: Remove extensions completely or leave empty

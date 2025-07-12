@@ -2,11 +2,10 @@
 -- 1. First ensure PLTelemetry is properly configured
 BEGIN
     PLTelemetry.set_backend_url('OTLP_BRIDGE');
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318'); 
-    PLT_OTLP_BRIDGE.set_service_info('oracle-forms', '2.1.0');
+    PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
+    PLT_OTLP_BRIDGE.set_service_info('oracle-forms', '2.1.0', 'test-environment');
     PLTelemetry.set_autocommit(TRUE);
     PLTelemetry.set_async_mode(FALSE);
-    PLT_OTLP_BRIDGE.set_native_json_mode(TRUE);
     PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
     FORM_KEY_COMMIT;
 END;

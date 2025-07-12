@@ -2,45 +2,46 @@
 
 > **OpenTelemetry Protocol Bridge for Oracle PL/SQL**
 
-A production-ready Oracle PL/SQL package that seamlessly connects [PLTelemetry](https://github.com/your-username/PLTelemetry) with any OpenTelemetry collector, enabling distributed tracing, metrics, and logging from Oracle databases to modern observability platforms.
+A production-ready Oracle PL/SQL package that seamlessly connects [PLTelemetry](https://github.com/your-username/PLTelemetry) with any OpenTelemetry collector, enabling distributed tracing, metrics, and logging from Oracle databases to modern observability platforms with full multi-tenant support.
 
 ## 🎯 What It Does
 
-PLT_OTLP_BRIDGE converts PLTelemetry's JSON telemetry data into OTLP (OpenTelemetry Protocol) format and sends it to any OpenTelemetry collector via HTTP. This enables Oracle databases to participate in modern distributed tracing ecosystems.
+PLT_OTLP_BRIDGE converts PLTelemetry's JSON telemetry data into full OTLP (OpenTelemetry Protocol) format and sends it to any OpenTelemetry collector. This enables Oracle databases to participate in enterprise distributed tracing ecosystems with complete multi-tenant support.
 
 **Data Flow:**
 ```
-Oracle PL/SQL → PLTelemetry → PLT_OTLP_BRIDGE → OTLP Collector → Grafana/Jaeger/Tempo
+Oracle PL/SQL → PLTelemetry → PLT_OTLP_BRIDGE → OTLP Collector → Grafana/Tempo/Jaeger
 ```
 
-## ✨ Features
+## ✨ Enterprise Features
 
-### Core Capabilities
-- **Distributed Tracing** - Converts PLTelemetry spans to OTLP traces with parent-child relationships
-- **Metrics Export** - Transforms custom metrics to OTLP gauge format
-- **Structured Logging** - Converts events and logs to OTLP log records with severity levels
-- **Trace Context Propagation** - Maintains trace and span IDs across the observability stack
+### Multi-Tenant Architecture
+- **Automatic tenant.id injection** in all telemetry data (traces, metrics, logs)
+- **Tenant context propagation** across distributed systems
+- **Grafana dashboard filtering** by tenant for enterprise isolation
+- **Resource-level tenant attribution** following OTLP standards
 
-### Enterprise-Grade Architecture
-- **Hybrid String Management** - Automatically switches between VARCHAR2 and CLOB for optimal memory usage
-- **Dual JSON Parsing** - Native Oracle 12c+ JSON functions with regex fallback for older versions
-- **Comprehensive Error Handling** - Never breaks business logic, includes autonomous transaction logging
-- **HTTP Chunked Transfer** - Handles large payloads efficiently with automatic chunking
-- **Configurable Timeouts** - Prevents hanging connections with adjustable timeout settings
+### Production-Ready Design
+- **Oracle 12c+ native JSON** objects only (JSON_OBJECT_T, JSON_ARRAY_T)
+- **Never breaks business logic** - comprehensive error isolation
+- **HTTP/1.1 with chunked transfer** for large payloads
+- **Configurable timeouts** prevent hanging connections
+- **Autonomous transaction error logging** for debugging
 
-### Production Features
-- **Debug Mode** - Detailed logging for troubleshooting and performance monitoring
-- **Resource Attribution** - Automatic service identification and metadata injection
-- **Status Code Mapping** - Proper OTLP status code conversion (OK, ERROR, UNSET)
-- **JSON Escaping** - Comprehensive handling of special characters and control sequences
+### Full OTLP Compliance
+- **resourceSpans structure** with proper resource attributes
+- **scopeSpans** with PLTelemetry identification
+- **Proper OTLP status codes** (OK=1, ERROR=2, UNSET=0)
+- **Unix nanosecond timestamps** for precise timing
+- **Severity number mapping** for logs (TRACE=1, INFO=9, ERROR=17, etc.)
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Oracle Database 12c+ (11g supported with legacy JSON mode)
+- Oracle Database 12c+ (native JSON support required)
 - PLTelemetry core package installed
-- UTL_HTTP and DBMS_CRYPTO privileges
-- Network access to your OpenTelemetry collector
+- UTL_HTTP privileges
+- Network access to OpenTelemetry collector
 
 ### Installation
 
@@ -53,181 +54,318 @@ Oracle PL/SQL → PLTelemetry → PLT_OTLP_BRIDGE → OTLP Collector → Grafana
 @PLT_OTLP_BRIDGE.pkb
 ```
 
-2. **REQUIRED: Configure PLTelemetry routing:**
+2. **MANDATORY: Configure PLTelemetry routing:**
 ```sql
--- MANDATORY: Tell PLTelemetry to use the OTLP bridge instead of direct HTTP
+-- CRITICAL: Tell PLTelemetry to use the OTLP bridge
 PLTelemetry.set_backend_url('OTLP_BRIDGE');
 ```
 
-3. **REQUIRED: Configure collector endpoint:**
+3. **MANDATORY: Set collector endpoint:**
 ```sql
--- MANDATORY: Set your OpenTelemetry collector endpoint
+-- CRITICAL: Configure your OpenTelemetry collector
 PLT_OTLP_BRIDGE.set_otlp_collector('http://your-collector:4318');
 ```
 
-4. **RECOMMENDED: Initial setup configuration:**
+4. **RECOMMENDED: Basic configuration:**
 ```sql
--- RECOMMENDED: Use sync mode for initial testing
+-- Sync mode for testing
 PLTelemetry.set_async_mode(FALSE);
 
--- USEFUL: Enable debug output during setup
+-- Debug output during setup
 PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
 
--- OPTIONAL: Configure service identification
-PLT_OTLP_BRIDGE.set_service_info(
-    p_service_name => 'your-oracle-app',
-    p_service_version => '1.0.0',
-    p_tenant_id => 'production'
-);
+-- Service identification
+PLT_OTLP_BRIDGE.set_service_info('my-oracle-app', '1.0.0');
 ```
 
-### ⚠️ Critical Configuration Notes
+### ⚠️ Critical Configuration
 
-**Without proper configuration, telemetry data will not reach your collector:**
+**Without proper configuration, telemetry data will NOT reach your collector:**
 
-- **Missing `PLTelemetry.set_backend_url('OTLP_BRIDGE')`** → PLTelemetry sends to default HTTP endpoint (fails)
-- **Missing `PLT_OTLP_BRIDGE.set_otlp_collector()`** → Bridge doesn't know where to send data (fails)
+**REQUIRED STEPS:**
+- ✅ `PLTelemetry.set_backend_url('OTLP_BRIDGE')` - Routes data to bridge
+- ✅ `PLT_OTLP_BRIDGE.set_otlp_collector(url)` - Sets collector endpoint
 
-**Data Flow:**
+**MISSING EITHER = NO DATA IN GRAFANA**
+
+**Data flow verification:**
 ```
-✅ WITH CONFIG:  PLTelemetry → PLT_OTLP_BRIDGE → OTLP Collector → Success
-❌ WITHOUT CONFIG: PLTelemetry → Default HTTP → Failure
+✅ WITH CONFIG:   PLTelemetry → PLT_OTLP_BRIDGE → OTLP Collector → Grafana
+❌ WITHOUT CONFIG: PLTelemetry → Default HTTP → Network Error
 ```
 
-### Basic Usage
+## 🏢 Multi-Tenant Setup
 
-Once configured, PLTelemetry automatically routes all telemetry through the OTLP bridge:
+For enterprise multi-tenant deployments:
 
 ```sql
--- FIRST: Configure the bridge (run once)
+-- Configure tenant context (adds tenant.id to ALL telemetry)
+PLT_OTLP_BRIDGE.set_tenant_context('CORE_QA', 'Core QA Environment');
+```
+
+**Results in:**
+- **Traces:** resource.attributes contains `tenant.id="CORE_QA"`
+- **Metrics:** dataPoint.attributes contains `tenant.id="CORE_QA"`
+- **Logs:** resource.attributes contains `tenant.id="CORE_QA"`
+
+**Grafana queries:**
+```logql
+# Tenant-specific logs
+{service_name="oracle-forms"} | json | resources_tenant_id="CORE_QA"
+
+# Tenant-specific metrics  
+pltelemetry_metrics{tenant_id="CORE_QA"}
+```
+
+## 📊 Basic Usage Example
+
+### Step 1: Configure Bridge (Once per session)
+```sql
 BEGIN
     -- MANDATORY configuration
     PLTelemetry.set_backend_url('OTLP_BRIDGE');
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://your-collector:4318');
+    PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
     
-    -- OPTIONAL configuration  
-    PLTelemetry.set_async_mode(FALSE);  -- Sync mode for testing
-    PLT_OTLP_BRIDGE.set_debug_mode(TRUE);  -- See what's happening
-    PLT_OTLP_BRIDGE.set_service_info('my-oracle-app', '1.0.0');
+    -- RECOMMENDED configuration
+    PLT_OTLP_BRIDGE.set_service_info('oracle-erp', '2.1.0');
+    PLT_OTLP_BRIDGE.set_tenant_context('tenant_001', 'Customer Portal');
+    PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
+    PLTelemetry.set_async_mode(FALSE);
 END;
 /
+```
 
--- THEN: Use PLTelemetry normally
+### Step 2: Use PLTelemetry Normally
+```sql
 DECLARE
     l_trace_id VARCHAR2(32);
     l_span_id VARCHAR2(16);
     l_attrs PLTelemetry.t_attributes;
 BEGIN
     -- Start distributed trace
-    l_trace_id := PLTelemetry.start_trace('process_order');
+    l_trace_id := PLTelemetry.start_trace('order_processing');
     l_span_id := PLTelemetry.start_span('validate_customer');
     
-    -- Add contextual attributes
+    -- Add business context
     l_attrs(1) := PLTelemetry.add_attribute('customer.id', '12345');
     l_attrs(2) := PLTelemetry.add_attribute('order.value', '299.99');
     
-    -- Add timeline events
+    -- Add timeline events  
     PLTelemetry.add_event(l_span_id, 'validation_started');
-    PLTelemetry.add_event(l_span_id, 'customer_found');
+    PLTelemetry.add_event(l_span_id, 'customer_verified');
     
-    -- Record performance metrics
-    PLTelemetry.log_metric('validation_duration_ms', 45.2, 'ms', l_attrs);
+    -- Record business metrics
+    PLTelemetry.log_metric('order_value', 299.99, 'currency', l_attrs);
+    PLTelemetry.log_metric('validation_time_ms', 45.2, 'ms');
     
-    -- Complete the trace
+    -- Complete trace
     PLTelemetry.end_span(l_span_id, 'OK', l_attrs);
     PLTelemetry.end_trace(l_trace_id);
 END;
 /
 ```
 
-## 🔧 Configuration
+## 🔗 Distributed Tracing Example
+
+Cross-system tracing between Oracle Forms, PL/SQL APIs, and external services:
+
+```sql
+-- Forms starts trace
+l_trace_id := PLTelemetry.start_trace('invoice_workflow');
+
+-- PL/SQL API continues same trace  
+l_span_id := PLTelemetry.continue_distributed_trace(
+    p_trace_id => l_trace_id,
+    p_operation => 'calculate_pricing',
+    p_tenant_id => 'tenant_001'
+);
+
+-- Result: All operations appear in single Grafana timeline
+-- Logs automatically correlated by trace_id
+-- Metrics tagged with same tenant context
+```
+
+## 🔧 Configuration Options
 
 ### Collector Configuration
 ```sql
--- Basic collector setup
-PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
+-- Basic setup (configures all endpoints)
+PLT_OTLP_BRIDGE.set_otlp_collector('http://collector:4318');
 
--- Individual endpoint configuration
-PLT_OTLP_BRIDGE.set_traces_endpoint('http://plt-otel-collector:4318/v1/traces');
-PLT_OTLP_BRIDGE.set_metrics_endpoint('http://plt-otel-collector:4318/v1/metrics');
-PLT_OTLP_BRIDGE.set_logs_endpoint('http://plt-otel-collector:4318/v1/logs');
+-- This automatically configures:
+-- Traces:  http://collector:4318/v1/traces
+-- Metrics: http://collector:4318/v1/metrics  
+-- Logs:    http://collector:4318/v1/logs
 ```
 
 ### Service Identification
 ```sql
 PLT_OTLP_BRIDGE.set_service_info(
-    p_service_name => 'order-processing-api',
-    p_service_version => '2.1.3',
-    p_tenant_id => 'customer-portal'
+    p_service_name => 'order-api',
+    p_service_version => '2.1.3'
+);
+```
+
+### Tenant Context (Enterprise)
+```sql
+PLT_OTLP_BRIDGE.set_tenant_context(
+    p_tenant_id => 'customer_portal',
+    p_tenant_name => 'Customer Portal Environment'
 );
 ```
 
 ### Performance Tuning
 ```sql
--- Set HTTP timeout (default: 30 seconds)
+-- HTTP timeout (seconds)
 PLT_OTLP_BRIDGE.set_timeout(45);
 
--- Enable native JSON parsing for Oracle 12c+ (better performance)
-PLT_OTLP_BRIDGE.set_native_json_mode(TRUE);
-
--- Enable debug mode for troubleshooting
+-- Debug output  
 PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
 ```
 
-## 📊 Supported Data Types
+## 📈 Supported Data Types
 
 ### Traces and Spans
-- **Trace Context** - 128-bit trace IDs, 64-bit span IDs
-- **Parent-Child Relationships** - Nested span hierarchies
-- **Span Status** - OK, ERROR, UNSET with proper OTLP mapping
-- **Timestamps** - Nanosecond precision Unix timestamps
-- **Attributes** - Key-value metadata with JSON escaping
+- **128-bit trace IDs, 64-bit span IDs** for OpenTelemetry compatibility
+- **Parent-child span relationships** for nested operations
+- **Span status mapping:** OK, ERROR, UNSET → OTLP codes (1, 2, 0)
+- **Timeline events** with nanosecond timestamps
+- **Resource attributes** with service and tenant context
 
 ### Metrics
-- **Gauge Metrics** - Point-in-time measurements
-- **Units** - Metric units (ms, bytes, requests, etc.)
-- **Trace Correlation** - Links metrics to active traces
-- **Custom Attributes** - Dimensional metadata
+- **Gauge metrics** for point-in-time measurements
+- **Histogram metrics** for duration measurements  
+- **Counter metrics** for accumulating values
+- **Metric units** (ms, bytes, currency, count, etc.)
+- **Automatic tenant.id injection** as dataPoint attribute
+- **Trace correlation** via trace.id attribute
 
-### Events and Logs
-- **Structured Events** - Timeline events within spans
-- **Log Levels** - TRACE, DEBUG, INFO, WARN, ERROR, FATAL
-- **Message Content** - Escaped log messages up to 4KB
-- **Trace Context** - Automatic trace/span ID correlation
+### Logs and Events
+- **Structured log records** with OTLP severity numbers
+- **Log levels:** TRACE(1), DEBUG(5), INFO(9), WARN(13), ERROR(17), FATAL(21)
+- **Automatic trace/span correlation** for debugging
+- **Tenant context** in resource attributes
+- **Message escaping** for special characters
 
-## 🏗️ Architecture Details
+## 🏗️ OTLP Output Structure
 
-### Hybrid String Management
-The bridge automatically chooses between VARCHAR2 and CLOB based on content size:
-- **Small payloads** (< 32KB) - Fast VARCHAR2 processing
-- **Large payloads** (> 32KB) - Automatic CLOB switching with chunked HTTP transfer
+### Traces (resourceSpans)
+```json
+{
+  "resourceSpans": [{
+    "resource": {
+      "attributes": [
+        {"key": "service.name", "value": {"stringValue": "oracle-erp"}},
+        {"key": "service.version", "value": {"stringValue": "2.1.0"}},
+        {"key": "tenant.id", "value": {"stringValue": "tenant_001"}},
+        {"key": "telemetry.sdk.name", "value": {"stringValue": "PLTelemetry"}}
+      ]
+    },
+    "scopeSpans": [{
+      "scope": {"name": "PLTelemetry", "version": "2.0.0"},
+      "spans": [{
+        "traceId": "...",
+        "spanId": "...", 
+        "name": "order_processing",
+        "startTimeUnixNano": "1752322142106000000",
+        "endTimeUnixNano": "1752322143260000000",
+        "status": {"code": 1},
+        "events": [...]
+      }]
+    }]
+  }]
+}
+```
 
-### Dual JSON Parsing
-- **Native Mode** - Oracle 12c+ JSON_VALUE/JSON_QUERY functions (faster)
-- **Legacy Mode** - Regex-based parsing for older Oracle versions
-- **Automatic Fallback** - Graceful degradation when native parsing fails
+### Metrics (resourceMetrics)
+```json
+{
+  "resourceMetrics": [{
+    "resource": {"attributes": [...]},
+    "scopeMetrics": [{
+      "scope": {"name": "PLTelemetry"},
+      "metrics": [{
+        "name": "order_value",
+        "unit": "currency",
+        "gauge": {
+          "dataPoints": [{
+            "timeUnixNano": "1752322142106000000",
+            "asDouble": 299.99,
+            "attributes": [
+              {"key": "tenant.id", "value": {"stringValue": "tenant_001"}},
+              {"key": "trace.id", "value": {"stringValue": "..."}}
+            ]
+          }]
+        }
+      }]
+    }]
+  }]
+}
+```
 
-### Error Handling
-- **Never Fail** - Business logic continues even if telemetry fails
-- **Autonomous Logging** - Errors logged to `plt_telemetry_errors` table
-- **Context Preservation** - Error logs include JSON payload samples for debugging
+### Logs (resourceLogs)
+```json
+{
+  "resourceLogs": [{
+    "resource": {"attributes": [...]},
+    "scopeLogs": [{
+      "scope": {"name": "PLTelemetry"},
+      "logRecords": [{
+        "timeUnixNano": "1752322142106000000",
+        "severityNumber": 9,
+        "severityText": "INFO",
+        "body": {"stringValue": "Order processed successfully"},
+        "traceId": "...",
+        "spanId": "...",
+        "attributes": [...]
+      }]
+    }]
+  }]
+}
+```
 
-## 📈 Performance Characteristics
+## 📊 Grafana Integration
 
-### Throughput
-- **Small spans** (< 1KB) - Processes ~1000/second
-- **Large spans** (> 10KB) - Automatic chunking prevents memory issues
-- **Batch Processing** - Single HTTP request per telemetry item
+The bridge provides complete integration with Grafana observability stack:
 
-### Memory Usage
-- **Adaptive** - VARCHAR2 for small payloads, CLOB for large ones
-- **Cleanup** - Automatic temporary LOB cleanup
-- **Buffer Management** - 8KB chunk size for optimal performance
+### Tempo (Distributed Tracing)
+```
+# Search by service
+{.service.name="oracle-erp"}
 
-### Network Efficiency
-- **HTTP/1.1** - Keep-alive connections where supported
-- **Content-Length** - Accurate size headers for optimal parsing
-- **Chunked Transfer** - Large payloads sent in manageable chunks
+# Search by tenant  
+{.tenant.id="tenant_001"}
+
+# Search by operation
+{.name="order_processing"}
+
+# Direct trace lookup
+abc123def456...
+```
+
+### Prometheus (Metrics)
+```promql
+# Tenant filtering
+pltelemetry_metrics{tenant_id="tenant_001"}
+
+# Service filtering  
+pltelemetry_metrics{service_name="oracle-erp"}
+
+# Trace correlation
+pltelemetry_metrics{trace_id="..."}
+```
+
+### Loki (Logs)
+```logql
+# Tenant logs
+{service_name="oracle-erp"} | json | resources_tenant_id="tenant_001"
+
+# Trace correlation
+{service_name="oracle-erp"} | json | traceid="..."
+
+# Error logs
+{service_name="oracle-erp"} | json | severity="ERROR"
+```
 
 ## 🐛 Troubleshooting
 
@@ -236,15 +374,15 @@ The bridge automatically chooses between VARCHAR2 and CLOB based on content size
 PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
 ```
 
-Debug output includes:
-- JSON payload sizes and processing mode
-- HTTP endpoint targets and response codes
-- Timing information for large transfers
-- JSON parsing mode selection (native vs legacy)
+**Debug output shows:**
+- JSON payload sizes and endpoint targets
+- HTTP response codes and timing
+- Tenant context injection status
+- OTLP structure validation
 
 ### Check Error Logs
 ```sql
-SELECT error_time, error_message, error_stack 
+SELECT error_time, error_message, module_name 
 FROM plt_telemetry_errors 
 WHERE module_name = 'PLT_OTLP_BRIDGE'
 ORDER BY error_time DESC;
@@ -252,38 +390,47 @@ ORDER BY error_time DESC;
 
 ### Common Issues
 
-**Connection refused:**
-- Verify collector URL and port
+**Connection Refused:**
+- Verify collector URL: `curl http://collector:4318/v1/traces`
 - Check network connectivity from database server
-- Ensure collector is running and listening
+- Ensure OTLP receiver is enabled in collector config
 
-**JSON parsing errors:**
-- Try switching JSON parsing mode: `PLT_OTLP_BRIDGE.set_native_json_mode(FALSE)`
-- Check for special characters in attribute values
-- Verify PLTelemetry JSON format
+**No Data in Grafana:**
+- Verify `PLTelemetry.set_backend_url('OTLP_BRIDGE')` is configured
+- Check `PLT_OTLP_BRIDGE.set_otlp_collector()` is set correctly  
+- Enable debug mode and check HTTP response codes
+- Verify collector is forwarding to Grafana backends
 
-**Timeout errors:**
-- Increase timeout: `PLT_OTLP_BRIDGE.set_timeout(60)`
-- Check collector performance
-- Consider collector queuing if using large payloads
+**Missing Tenant Context:**
+- Ensure `PLT_OTLP_BRIDGE.set_tenant_context()` is called
+- Check resource attributes in debug output
+- Verify Grafana queries use correct tenant field names
 
 ## 🔌 Collector Configuration
 
-### OTEL Collector Config Example
+### OTEL Collector Example
 ```yaml
 receivers:
   otlp:
     protocols:
       http:
         endpoint: 0.0.0.0:4318
-        
+        cors:
+          allowed_origins: ["*"]
+
 exporters:
-  jaeger:
-    endpoint: jaeger:14250
+  # Traces to Tempo  
+  otlp/tempo:
+    endpoint: http://tempo:4317
     tls:
       insecure: true
+      
+  # Metrics to Prometheus
   prometheus:
     endpoint: "0.0.0.0:8889"
+    namespace: "pltelemetry"
+    
+  # Logs to Loki
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
 
@@ -291,63 +438,121 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      exporters: [jaeger]
+      exporters: [otlp/tempo]
     metrics:
-      receivers: [otlp]  
+      receivers: [otlp]
       exporters: [prometheus]
     logs:
-      receivers: [otlp]
+      receivers: [otlp] 
       exporters: [loki]
 ```
 
-### Grafana Integration
-The bridge works seamlessly with Grafana's observability stack:
-- **Tempo** - Distributed tracing visualization
-- **Prometheus** - Metrics collection and alerting
-- **Loki** - Log aggregation and search
+## 📋 System Requirements
 
-## 📋 Requirements
+### Database Requirements
+- Oracle Database 12c+ (native JSON support required)
+- PLTelemetry core package installed
 
-### Database Privileges
+### Required Privileges
 ```sql
--- Required grants (run as DBA)
+-- Run as DBA
 GRANT EXECUTE ON UTL_HTTP TO your_user;
 GRANT EXECUTE ON DBMS_CRYPTO TO your_user;
-GRANT EXECUTE ON DBMS_LOB TO your_user;
+GRANT CREATE JOB TO your_user;
 ```
 
-### Network ACLs
+### Network ACL (Oracle 11g+)
 ```sql
--- Allow HTTP access to collector
 BEGIN
   DBMS_NETWORK_ACL_ADMIN.CREATE_ACL(
-    acl => 'otlp_collector_acl.xml',
-    description => 'OTLP Collector Access',
+    acl => 'otlp_bridge_acl.xml',
+    description => 'OTLP Bridge Network Access',
     principal => 'YOUR_USER',
     is_grant => TRUE,
     privilege => 'connect'
   );
   
   DBMS_NETWORK_ACL_ADMIN.ASSIGN_ACL(
-    acl => 'otlp_collector_acl.xml',
-    host => 'your-collector-host'
+    acl => 'otlp_bridge_acl.xml',
+    host => 'your-collector-host',
+    lower_port => 4318,
+    upper_port => 4318
   );
 END;
 /
 ```
 
-## 🤝 Integration with PLTelemetry
+## ⚡ Performance Characteristics
 
-This bridge is designed as a drop-in backend for [PLTelemetry](https://github.com/your-username/PLTelemetry). Simply configure PLTelemetry to use `'OTLP_BRIDGE'` as the backend URL, and all telemetry data will automatically flow through this bridge to your OpenTelemetry infrastructure.
+### Throughput
+- **Small spans** (<1KB): ~500-1000 per second
+- **Large spans** (>10KB): Limited by network bandwidth
+- **Automatic HTTP chunking** for large payloads
+
+### Memory Usage
+- **Native JSON objects** minimize memory allocations
+- **Automatic CLOB cleanup** prevents memory leaks
+- **32KB VARCHAR2 threshold** for optimal performance
+
+### Network Efficiency
+- **Single HTTP request** per telemetry item
+- **Proper Content-Length headers** for optimal parsing
+- **Configurable timeouts** prevent hanging connections
+
+### Error Isolation
+- **Telemetry failures never impact business logic**
+- **Autonomous transaction error logging**
+- **Graceful degradation** on network issues
+
+## 🏢 Enterprise Deployment
+
+### Multi-Environment Configuration
+```sql
+-- Production
+PLT_OTLP_BRIDGE.set_otlp_collector('http://prod-collector:4318');
+PLT_OTLP_BRIDGE.set_tenant_context('prod_tenant', 'Production Environment');
+
+-- Staging  
+PLT_OTLP_BRIDGE.set_otlp_collector('http://staging-collector:4318');
+PLT_OTLP_BRIDGE.set_tenant_context('staging_tenant', 'Staging Environment');
+```
+
+### High Availability
+- Configure multiple collector endpoints for failover
+- Use async mode for high-throughput environments
+- Monitor `plt_telemetry_errors` table for issues
+
+### Security Considerations
+- Network ACLs restrict collector access
+- No sensitive data in telemetry by default
+- Tenant isolation at resource attribute level
+
+## 🚀 What's Next
+
+### Planned Features
+- **Batch export** for high-volume environments
+- **gRPC protocol support** (OTLP/gRPC)
+- **Built-in sampling strategies** for production workloads
+- **Compression support** for large payloads
+- **Authentication** (API keys, OIDC tokens)
+
+### Current Limitations
+- HTTP/1.1 only (no HTTP/2)
+- No built-in sampling (all spans exported)
+- Single request per telemetry item (no batching)
+- Basic authentication only (API key headers)
+
+## 🤝 Integration Notes
+
+This bridge is specifically designed for PLTelemetry and provides:
+- **Drop-in backend replacement** (set backend_url to 'OTLP_BRIDGE')  
+- **Zero code changes** to existing PLTelemetry usage
+- **Full OpenTelemetry ecosystem compatibility**
+- **Enterprise multi-tenant support**
+- **Production-grade error handling and performance**
+
+For more information about PLTelemetry core functionality, see the main PLTelemetry repository documentation.
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🚀 What's Next
-
-- **gRPC Support** - Direct OTLP/gRPC protocol support
-- **Batch Export** - Configurable batching for high-volume environments  
-- **Sampling** - Built-in sampling strategies for production workloads
-- **Compression** - GZIP compression for network efficiency
-- **Authentication** - OIDC and API key authentication support
