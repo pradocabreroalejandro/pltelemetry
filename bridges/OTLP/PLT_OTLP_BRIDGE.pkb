@@ -694,13 +694,15 @@ AS
         
         -- BUILD EVENTS ARRAY
         l_events_array := JSON_ARRAY_T();
-        
+
         IF l_events_json IS NOT NULL AND l_events_json != '[]' THEN
             DECLARE
                 l_events_arr JSON_ARRAY_T;
-                l_event_obj  JSON_OBJECT_T;
+                l_event_obj JSON_OBJECT_T;
                 l_event_name VARCHAR2(255);
                 l_event_time VARCHAR2(50);
+                l_event_attrs VARCHAR2(4000);  -- ← AÑADIR DECLARACIÓN
+                l_attrs_otlp CLOB;              -- ← AÑADIR DECLARACIÓN
             BEGIN
                 l_events_arr := JSON_ARRAY_T.parse(l_events_json);
                 
@@ -708,19 +710,28 @@ AS
                     l_event_obj := JSON_OBJECT_T(l_events_arr.get(i));
                     l_event_name := l_event_obj.get_string('name');
                     l_event_time := l_event_obj.get_string('time');
+                    l_event_attrs := l_event_obj.get_string('attributes');  -- ✅ YA LO TIENES
                     
+                    -- ← CONVERTIR ATTRIBUTES
+                    l_attrs_otlp := convert_attributes_to_otlp(l_event_attrs);
+                    
+                    -- ← USAR ATTRIBUTES REALES EN LUGAR DE []
                     l_events_array.append(JSON_OBJECT_T('{
                         "timeUnixNano": "' || to_unix_nano(l_event_time) || '",
                         "name": "' || escape_json_string(l_event_name) || '",
-                        "attributes": []
+                        "attributes": ' || l_attrs_otlp || '
                     }'));
+                    
+                    -- ← CLEANUP CLOB
+                    IF DBMS_LOB.ISTEMPORARY(l_attrs_otlp) = 1 THEN
+                        DBMS_LOB.FREETEMPORARY(l_attrs_otlp);
+                    END IF;
                 END LOOP;
             EXCEPTION
                 WHEN OTHERS THEN
                     log_error_internal('send_trace_otlp', 'Failed to parse events: ' || SUBSTR(SQLERRM, 1, 200));
             END;
         END IF;
-        
         -- BUILD SPAN OBJECT
         l_span_obj.put('traceId', l_trace_id);
         l_span_obj.put('spanId', l_span_id);

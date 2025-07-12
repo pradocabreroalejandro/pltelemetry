@@ -100,21 +100,21 @@ For enterprise multi-tenant deployments:
 
 ```sql
 -- Configure tenant context (adds tenant.id to ALL telemetry)
-PLT_OTLP_BRIDGE.set_tenant_context('CORE_QA', 'Core QA Environment');
+PLT_OTLP_BRIDGE.set_tenant_context('TEST', 'TEST Environment');
 ```
 
 **Results in:**
-- **Traces:** resource.attributes contains `tenant.id="CORE_QA"`
-- **Metrics:** dataPoint.attributes contains `tenant.id="CORE_QA"`
-- **Logs:** resource.attributes contains `tenant.id="CORE_QA"`
+- **Traces:** resource.attributes contains `tenant.id="TEST"`
+- **Metrics:** dataPoint.attributes contains `tenant.id="TEST"`
+- **Logs:** resource.attributes contains `tenant.id="TEST"`
 
 **Grafana queries:**
 ```logql
 # Tenant-specific logs
-{service_name="oracle-forms"} | json | resources_tenant_id="CORE_QA"
+{service_name="oracle-forms"} | json | resources_tenant_id="TEST"
 
 # Tenant-specific metrics  
-pltelemetry_metrics{tenant_id="CORE_QA"}
+pltelemetry_metrics{tenant_id="TEST"}
 ```
 
 ## 📊 Basic Usage Example
