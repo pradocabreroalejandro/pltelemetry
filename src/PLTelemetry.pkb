@@ -2,7 +2,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry
 AS
     /**
      * PLTelemetry - OpenTelemetry SDK for PL/SQL
-     * Version: 0.3.0 - Clean Oracle 12c+ Edition
+     * Version: 0.3.1 - Normalized Input Edition
      * 
      * This package provides distributed tracing capabilities for Oracle PL/SQL
      * applications following OpenTelemetry standards.
@@ -106,6 +106,39 @@ AS
     --------------------------------------------------------------------------
 
     /**
+     * Normalize input strings for safe processing
+     */
+    FUNCTION normalize_string(
+        p_input      VARCHAR2,
+        p_max_length NUMBER DEFAULT 4000,
+        p_allow_null BOOLEAN DEFAULT TRUE
+    ) RETURN VARCHAR2
+    IS
+        l_result VARCHAR2(32767);
+    BEGIN
+        -- Handle NULL input
+        IF p_input IS NULL THEN
+            RETURN CASE WHEN p_allow_null THEN NULL ELSE '' END;
+        END IF;
+        
+        -- Minimal normalization - just the essentials
+        l_result := TRIM(p_input);                    -- Remove leading/trailing spaces
+        l_result := REPLACE(l_result, CHR(0), '');   -- Remove null terminators (Forms legacy)
+        
+        -- Apply length limit
+        IF LENGTH(l_result) > p_max_length THEN
+            l_result := SUBSTR(l_result, 1, p_max_length - 3) || '...';
+        END IF;
+        
+        RETURN l_result;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Fallback: basic TRIM and length limit
+            RETURN SUBSTR(TRIM(NVL(p_input, '')), 1, p_max_length);
+    END normalize_string;
+
+    /**
      * Validate attribute key follows OpenTelemetry naming conventions
      */
     FUNCTION validate_attribute_key(p_key VARCHAR2) 
@@ -200,24 +233,30 @@ AS
     FUNCTION add_attribute (p_key VARCHAR2, p_value VARCHAR2)
         RETURN VARCHAR2
     IS
+        l_key   VARCHAR2(255);
+        l_value VARCHAR2(4000);
     BEGIN
+        -- Normalize & validate input parameters
+        l_key := normalize_string(p_key, p_max_length => 255, p_allow_null => FALSE);
+        l_value := normalize_string(p_value, p_max_length => 4000, p_allow_null => TRUE);
+        
         -- Validate key follows OpenTelemetry conventions
-        IF NOT validate_attribute_key(p_key) THEN
+        IF NOT validate_attribute_key(l_key) THEN
             log_error_internal(
                 'add_attribute',
-                'Invalid attribute key: ' || SUBSTR(p_key, 1, 100) || 
+                'Invalid attribute key: ' || SUBSTR(l_key, 1, 100) || 
                 ' - must start with letter and contain only letters, numbers, dots, or underscores'
             );
             RETURN NULL;
         END IF;
         
-        -- Validate value is not null
-        IF p_value IS NULL THEN
-            RETURN p_key || '=';
+        -- Handle null value
+        IF l_value IS NULL THEN
+            RETURN l_key || '=';
         END IF;
         
-        -- Escape special characters
-        RETURN p_key || '=' || REPLACE(REPLACE(p_value, '\', '\\'), '=', '\=');
+        -- Escape special characters and return
+        RETURN l_key || '=' || REPLACE(REPLACE(l_value, '\', '\\'), '=', '\=');
     END add_attribute;
 
     /**
@@ -625,15 +664,22 @@ AS
         RETURN VARCHAR2
     IS
         l_trace_id      VARCHAR2(32);
+        l_operation     VARCHAR2(255);
         l_retry_count   NUMBER := 0;
         l_max_retries   CONSTANT NUMBER := 3;
         l_error_msg     VARCHAR2(4000);
     BEGIN
+        -- Normalize & validate input parameters
+        l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
+        
+        IF l_operation IS NULL OR LENGTH(l_operation) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20102, 'Operation name cannot be null or empty');
+        END IF;
+        
         LOOP
             BEGIN
                 l_trace_id := generate_trace_id();
                 set_internal_trace_context(l_trace_id, NULL);
-
                 set_trace_context();
 
                 INSERT INTO plt_traces (
@@ -644,7 +690,7 @@ AS
                     service_instance
                 ) VALUES (
                     l_trace_id,
-                    p_operation,
+                    l_operation,  -- Using normalized operation
                     SYSTIMESTAMP,
                     'oracle-plsql',
                     SYS_CONTEXT('USERENV', 'HOST') || ':' || SYS_CONTEXT('USERENV', 'INSTANCE_NAME')
@@ -712,20 +758,28 @@ AS
     ) RETURN VARCHAR2
     IS
         l_span_id    VARCHAR2(16);
+        l_trace_id   VARCHAR2(32);
+        l_operation  VARCHAR2(255);
+        l_tenant_id  VARCHAR2(100);
         l_error_msg  VARCHAR2(4000);
     BEGIN
+        -- Normalize & validate input parameters
+        l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => FALSE);
+        l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
+        l_tenant_id := normalize_string(p_tenant_id, p_max_length => 100, p_allow_null => TRUE);
+        
         -- Validate input
-        IF p_trace_id IS NULL OR LENGTH(p_trace_id) != 32 THEN
+        IF l_trace_id IS NULL OR LENGTH(l_trace_id) != 32 THEN
             RAISE_APPLICATION_ERROR(-20100, 'Invalid trace_id: must be 32 character hex string');
         END IF;
         
-        IF p_operation IS NULL THEN
+        IF l_operation IS NULL OR LENGTH(l_operation) = 0 THEN
             RAISE_APPLICATION_ERROR(-20101, 'Operation name is required');
         END IF;
         
         -- Set context and start span
-        set_internal_trace_context(p_trace_id, NULL);
-        l_span_id := start_span(p_operation, NULL, p_trace_id);
+        set_internal_trace_context(l_trace_id, NULL);
+        l_span_id := start_span(l_operation, NULL, l_trace_id);
         
         -- Add distributed tracing attributes
         BEGIN
@@ -735,9 +789,9 @@ AS
             INSERT INTO plt_span_attributes (span_id, attribute_key, attribute_value)
             VALUES (l_span_id, 'system.name', 'oracle-plsql');
             
-            IF p_tenant_id IS NOT NULL THEN
+            IF l_tenant_id IS NOT NULL THEN
                 INSERT INTO plt_span_attributes (span_id, attribute_key, attribute_value)
-                VALUES (l_span_id, 'tenant.id', p_tenant_id);
+                VALUES (l_span_id, 'tenant.id', l_tenant_id);
             END IF;
             
             INSERT INTO plt_span_attributes (span_id, attribute_key, attribute_value)
@@ -753,7 +807,7 @@ AS
         EXCEPTION
             WHEN OTHERS THEN
                 l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                log_error_internal('continue_distributed_trace', 'Failed to add distributed trace attributes: ' || l_error_msg, p_trace_id, l_span_id);
+                log_error_internal('continue_distributed_trace', 'Failed to add distributed trace attributes: ' || l_error_msg, l_trace_id, l_span_id);
         END;
         
         -- Log the continuation
@@ -762,7 +816,7 @@ AS
         BEGIN
             l_attrs(1) := add_attribute('trace.source', 'external');
             l_attrs(2) := add_attribute('system.previous', 'oracle-forms');
-            l_attrs(3) := add_attribute('tenant.id', NVL(p_tenant_id, 'default'));
+            l_attrs(3) := add_attribute('tenant.id', NVL(l_tenant_id, 'default'));
             add_event(l_span_id, 'distributed_trace_continued', l_attrs);
         END;
         
@@ -771,12 +825,12 @@ AS
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('continue_distributed_trace', l_error_msg, p_trace_id);
+            log_error_internal('continue_distributed_trace', l_error_msg, l_trace_id);
             
             -- Still try to create a basic span
             BEGIN
                 l_span_id := generate_span_id();
-                set_internal_trace_context(p_trace_id, l_span_id);
+                set_internal_trace_context(l_trace_id, l_span_id);
                 RETURN l_span_id;
             EXCEPTION
                 WHEN OTHERS THEN
@@ -838,18 +892,28 @@ AS
     IS
         l_span_id       VARCHAR2(16);
         l_trace_id      VARCHAR2(32);
+        l_operation     VARCHAR2(255);
+        l_parent_span_id VARCHAR2(16);
         l_retry_count   NUMBER := 0;
         l_max_retries   CONSTANT NUMBER := 3;
         l_error_msg     VARCHAR2(4000);
     BEGIN
+        -- Normalize & validate input parameters
+        l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
+        l_parent_span_id := normalize_string(p_parent_span_id, p_max_length => 16, p_allow_null => TRUE);
+        l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => TRUE);
+        
+        IF l_operation IS NULL OR LENGTH(l_operation) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20103, 'Operation name cannot be null or empty');
+        END IF;
+        
         LOOP
             BEGIN
                 l_span_id := generate_span_id();
                 
                 -- Use provided trace_id or current one
-                l_trace_id := NVL(p_trace_id, NVL(g_current_trace_id, generate_trace_id()));
+                l_trace_id := NVL(l_trace_id, NVL(g_current_trace_id, generate_trace_id()));
                 set_internal_trace_context(l_trace_id, l_span_id);
-
                 set_trace_context();
 
                 INSERT INTO plt_spans (
@@ -862,8 +926,8 @@ AS
                 ) VALUES (
                     l_trace_id,
                     l_span_id,
-                    p_parent_span_id,
-                    p_operation,
+                    l_parent_span_id,
+                    l_operation,  -- Using normalized operation
                     SYSTIMESTAMP,
                     'RUNNING'
                 );
@@ -906,11 +970,19 @@ AS
         l_start_time     TIMESTAMP WITH TIME ZONE;
         l_operation_name VARCHAR2(255);
         l_error_msg      VARCHAR2(4000);
-        l_parent_span_id VARCHAR2(16); 
+        l_parent_span_id VARCHAR2(16);
+        l_span_id        VARCHAR2(16);
+        l_status         VARCHAR2(50);
     BEGIN
-        IF p_span_id IS NULL THEN
+        -- Normalize & validate input parameters
+        l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => FALSE);
+        l_status := normalize_string(p_status, p_max_length => 50, p_allow_null => TRUE);
+        
+        IF l_span_id IS NULL THEN
             RETURN;
         END IF;
+        
+        l_status := NVL(l_status, 'OK');
 
         -- Get span info and calculate duration
         BEGIN
@@ -918,10 +990,10 @@ AS
                    EXTRACT(SECOND FROM (SYSTIMESTAMP - start_time)) * 1000
             INTO l_start_time, l_operation_name, l_parent_span_id, l_duration
             FROM plt_spans
-            WHERE span_id = p_span_id;
+            WHERE span_id = l_span_id;
         EXCEPTION
             WHEN NO_DATA_FOUND THEN
-                log_error_internal('end_span', 'Span not found', NULL, p_span_id);
+                log_error_internal('end_span', 'Span not found', NULL, l_span_id);
                 RETURN;
             WHEN TOO_MANY_ROWS THEN
                 l_duration := 0;
@@ -930,11 +1002,11 @@ AS
 
         -- Update span
         UPDATE plt_spans
-        SET end_time = SYSTIMESTAMP, duration_ms = l_duration, status = p_status
-        WHERE span_id = p_span_id AND end_time IS NULL;
+        SET end_time = SYSTIMESTAMP, duration_ms = l_duration, status = l_status
+        WHERE span_id = l_span_id AND end_time IS NULL;
 
         IF SQL%ROWCOUNT = 0 THEN
-            log_error_internal('end_span', 'Span already ended or not found', NULL, p_span_id);
+            log_error_internal('end_span', 'Span already ended or not found', NULL, l_span_id);
             RETURN;
         END IF;
 
@@ -945,7 +1017,7 @@ AS
           AND NOT EXISTS (
               SELECT 1 FROM plt_spans
               WHERE trace_id = g_current_trace_id 
-                AND span_id != p_span_id 
+                AND span_id != l_span_id 
                 AND end_time IS NULL
           );
 
@@ -960,14 +1032,14 @@ AS
                     'time' VALUE TO_CHAR(event_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'),
                     'attributes' VALUE CASE 
                         WHEN attributes IS NOT NULL AND attributes != '{}' 
-                        THEN JSON_OBJECT('data' VALUE attributes)
+                        THEN attributes
                         ELSE JSON_OBJECT()
                     END
                 )
                 ORDER BY event_time
             ) INTO l_events_json
             FROM plt_events 
-            WHERE span_id = p_span_id;
+            WHERE span_id = l_span_id;
             
             IF l_events_json IS NULL THEN
                 l_events_json := '[]';
@@ -977,26 +1049,26 @@ AS
             WHEN OTHERS THEN
                 l_events_json := '[]';
                 l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
-                log_error_internal('end_span', 'Failed to build events JSON: ' || l_error_msg, NULL, p_span_id);
+                log_error_internal('end_span', 'Failed to build events JSON: ' || l_error_msg, NULL, l_span_id);
         END;
 
         -- Build complete JSON
         l_json := '{'
             || '"trace_id":"' || NVL(g_current_trace_id, 'unknown') || '",'
-            || '"span_id":"' || p_span_id || '",'
+            || '"span_id":"' || l_span_id || '",'
             || '"parent_span_id":"' || NVL(l_parent_span_id, '') || '",'
             || '"operation_name":"' || REPLACE(l_operation_name, '"', '\"') || '",' 
             || '"start_time":"' || TO_CHAR(l_start_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'  
             || '"end_time":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'   
             || '"duration_ms":' || NVL(TO_CHAR(l_duration), '0') || ','
-            || '"status":"' || NVL(p_status, 'OK') || '",'
+            || '"status":"' || l_status || '",'
             || '"events":' || l_events_json || ','
             || '"attributes":' || l_attrs_json
             || '}';
 
         -- Validate JSON
         IF l_json IS NOT JSON THEN
-            log_error_internal('end_span', 'Invalid JSON: ' || SUBSTR(l_json, 1, 200), NULL, p_span_id);
+            log_error_internal('end_span', 'Invalid JSON: ' || SUBSTR(l_json, 1, 200), NULL, l_span_id);
             RETURN;
         END IF;
 
@@ -1010,13 +1082,13 @@ AS
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('end_span', l_error_msg, NULL, p_span_id);
+            log_error_internal('end_span', l_error_msg, NULL, l_span_id);
 
             -- Try to at least update the span as ERROR
             BEGIN
                 UPDATE plt_spans
                 SET end_time = SYSTIMESTAMP, status = 'ERROR', duration_ms = 0
-                WHERE span_id = p_span_id AND end_time IS NULL;
+                WHERE span_id = l_span_id AND end_time IS NULL;
 
                 IF g_autocommit THEN
                     COMMIT;
@@ -1034,8 +1106,14 @@ AS
     IS
         l_attrs_varchar   VARCHAR2(4000);
         l_error_msg       VARCHAR2(4000);
+        l_span_id         VARCHAR2(16);
+        l_event_name      VARCHAR2(255);
     BEGIN
-        IF p_span_id IS NULL OR p_event_name IS NULL THEN
+        -- Normalize & validate input parameters
+        l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => FALSE);
+        l_event_name := normalize_string(p_event_name, p_max_length => 255, p_allow_null => FALSE);
+        
+        IF l_span_id IS NULL OR l_event_name IS NULL THEN
             RETURN;
         END IF;
 
@@ -1049,7 +1127,7 @@ AS
             WHEN OTHERS THEN
                 l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
                 l_attrs_varchar := '{}';
-                log_error_internal('add_event', 'Failed to convert attributes - ' || SUBSTR(l_error_msg, 1, 200), NULL, p_span_id);
+                log_error_internal('add_event', 'Failed to convert attributes - ' || SUBSTR(l_error_msg, 1, 200), NULL, l_span_id);
         END;
 
         -- Validate JSON
@@ -1064,8 +1142,8 @@ AS
             event_time,
             attributes
         ) VALUES (
-            p_span_id,
-            SUBSTR(p_event_name, 1, 255),
+            l_span_id,
+            l_event_name,
             SYSTIMESTAMP,
             l_attrs_varchar
         );
@@ -1077,7 +1155,7 @@ AS
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('add_event', l_error_msg, NULL, p_span_id);
+            log_error_internal('add_event', l_error_msg, NULL, l_span_id);
     END add_event;
 
     --------------------------------------------------------------------------
@@ -1096,10 +1174,18 @@ AS
         l_attrs_json   VARCHAR2(4000);
         l_error_msg    VARCHAR2(4000);
         l_value_str    VARCHAR2(50);
+        l_metric_name  VARCHAR2(255);
+        l_unit         VARCHAR2(50);
     BEGIN
-        IF p_metric_name IS NULL OR p_value IS NULL THEN
+        -- Normalize & validate input parameters
+        l_metric_name := normalize_string(p_metric_name, p_max_length => 255, p_allow_null => FALSE);
+        l_unit := normalize_string(p_unit, p_max_length => 50, p_allow_null => TRUE);
+        
+        IF l_metric_name IS NULL OR p_value IS NULL THEN
             RETURN;
         END IF;
+        
+        l_unit := NVL(l_unit, 'unit');
 
         -- Convert attributes to JSON
         l_attrs_json := attributes_to_json(p_attributes);
@@ -1114,9 +1200,9 @@ AS
 
         -- Build metric JSON
         l_json := '{'
-            || '"name":"' || REPLACE(SUBSTR(p_metric_name, 1, 255), '"', '\"') || '",'
+            || '"name":"' || REPLACE(l_metric_name, '"', '\"') || '",'
             || '"value":' || l_value_str || ','
-            || '"unit":"' || REPLACE(NVL(SUBSTR(p_unit, 1, 50), 'unit'), '"', '\"') || '",'
+            || '"unit":"' || REPLACE(l_unit, '"', '\"') || '",'
             || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
             || '"trace_id":"' || NVL(g_current_trace_id, 'no-trace') || '",'
             || '"span_id":"' || NVL(g_current_span_id, 'no-span') || '",'
@@ -1139,9 +1225,9 @@ AS
             timestamp,
             attributes
         ) VALUES (
-            SUBSTR(p_metric_name, 1, 255),
+            l_metric_name,
             p_value,
-            SUBSTR(NVL(p_unit, 'unit'), 1, 50),
+            l_unit,
             g_current_trace_id,
             g_current_span_id,
             SYSTIMESTAMP,
@@ -1179,8 +1265,18 @@ AS
         l_json         VARCHAR2(32767);
         l_attrs_json   VARCHAR2(4000);
         l_error_msg    VARCHAR2(4000);
+        l_trace_id     VARCHAR2(32);
+        l_span_id      VARCHAR2(16);
+        l_level        VARCHAR2(10);
+        l_message      VARCHAR2(4000);
     BEGIN
-        IF p_level IS NULL OR p_message IS NULL THEN
+        -- Normalize & validate input parameters
+        l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => TRUE);
+        l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => TRUE);
+        l_level := normalize_string(p_level, p_max_length => 10, p_allow_null => FALSE);
+        l_message := normalize_string(p_message, p_max_length => 4000, p_allow_null => FALSE);
+        
+        IF l_level IS NULL OR l_message IS NULL THEN
             RETURN;
         END IF;
 
@@ -1189,17 +1285,17 @@ AS
 
         -- Build log JSON
         l_json := '{'
-            || '"severity":"' || UPPER(p_level) || '",'
-            || '"message":"' || REPLACE(SUBSTR(p_message, 1, 4000), '"', '\"') || '",'
+            || '"severity":"' || UPPER(l_level) || '",'
+            || '"message":"' || REPLACE(l_message, '"', '\"') || '",'
             || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
             || CASE 
-                    WHEN p_trace_id IS NOT NULL AND LENGTH(p_trace_id) = 32 
-                    THEN '"trace_id":"' || p_trace_id || '",'
+                    WHEN l_trace_id IS NOT NULL AND LENGTH(l_trace_id) = 32 
+                    THEN '"trace_id":"' || l_trace_id || '",'
                     ELSE ''
                 END
             || CASE 
-                    WHEN p_span_id IS NOT NULL AND LENGTH(p_span_id) = 16 
-                    THEN '"span_id":"' || p_span_id || '",'
+                    WHEN l_span_id IS NOT NULL AND LENGTH(l_span_id) = 16 
+                    THEN '"span_id":"' || l_span_id || '",'
                     ELSE ''
                 END
             || '"attributes":' || l_attrs_json
@@ -1215,10 +1311,10 @@ AS
                 timestamp,
                 attributes
             ) VALUES (
-                p_trace_id,
-                p_span_id,
-                UPPER(p_level),
-                SUBSTR(p_message, 1, 4000),
+                l_trace_id,
+                l_span_id,
+                UPPER(l_level),
+                l_message,
                 SYSTIMESTAMP,
                 l_attrs_json
             );
@@ -1295,9 +1391,17 @@ AS
     IS
         l_attributes t_attributes;
         l_idx        NUMBER := 1;
+        l_system     VARCHAR2(50);
+        l_tenant_id  VARCHAR2(100);
     BEGIN
+        -- Normalize & validate input parameters
+        l_system := normalize_string(p_system, p_max_length => 50, p_allow_null => TRUE);
+        l_tenant_id := normalize_string(p_tenant_id, p_max_length => 100, p_allow_null => TRUE);
+        
+        l_system := NVL(l_system, 'PLSQL');
+        
         -- Build distributed logging attributes
-        l_attributes(l_idx) := add_attribute('system.name', p_system);
+        l_attributes(l_idx) := add_attribute('system.name', l_system);
         l_idx := l_idx + 1;
         
         l_attributes(l_idx) := add_attribute('trace.distributed', 'true');
@@ -1309,8 +1413,8 @@ AS
         l_attributes(l_idx) := add_attribute('db.user', SYS_CONTEXT('USERENV', 'SESSION_USER'));
         l_idx := l_idx + 1;
         
-        IF p_tenant_id IS NOT NULL THEN
-            l_attributes(l_idx) := add_attribute('tenant.id', p_tenant_id);
+        IF l_tenant_id IS NOT NULL THEN
+            l_attributes(l_idx) := add_attribute('tenant.id', l_tenant_id);
         END IF;
         
         log_with_trace(p_trace_id, p_level, p_message, l_attributes);
@@ -1357,9 +1461,15 @@ AS
      */
     PROCEDURE set_tenant_context(p_tenant_id VARCHAR2, p_tenant_name VARCHAR2 DEFAULT NULL)
     IS
+        l_tenant_id   VARCHAR2(100);
+        l_tenant_name VARCHAR2(255);
     BEGIN
-        g_current_tenant_id := SUBSTR(p_tenant_id, 1, 100);
-        g_current_tenant_name := SUBSTR(p_tenant_name, 1, 255);
+        -- Normalize & validate input parameters
+        l_tenant_id := normalize_string(p_tenant_id, p_max_length => 100, p_allow_null => FALSE);
+        l_tenant_name := normalize_string(p_tenant_name, p_max_length => 255, p_allow_null => TRUE);
+        
+        g_current_tenant_id := l_tenant_id;
+        g_current_tenant_name := l_tenant_name;
         
         -- Update session context to include tenant
         set_trace_context();
@@ -1475,52 +1585,52 @@ AS
         RETURN g_backend_url;
     END get_backend_url;
 
-    /**
-     * Sets the API key for backend authentication
-     */
-    PROCEDURE set_api_key (p_key VARCHAR2)
-    IS
-    BEGIN
-        g_api_key := p_key;
-    END set_api_key;
+/**
+    * Sets the API key for backend authentication
+    */
+   PROCEDURE set_api_key (p_key VARCHAR2)
+   IS
+   BEGIN
+       g_api_key := p_key;
+   END set_api_key;
 
-    /**
-     * Sets the HTTP timeout for backend calls
-     */
-    PROCEDURE set_backend_timeout (p_timeout NUMBER)
-    IS
-    BEGIN
-        g_backend_timeout := p_timeout;
-    END set_backend_timeout;
+   /**
+    * Sets the HTTP timeout for backend calls
+    */
+   PROCEDURE set_backend_timeout (p_timeout NUMBER)
+   IS
+   BEGIN
+       g_backend_timeout := p_timeout;
+   END set_backend_timeout;
 
-    /**
-     * Sets the async processing mode
-     */
-    PROCEDURE set_async_mode (p_async BOOLEAN)
-    IS
-    BEGIN
-        g_async_mode := p_async;
-    END set_async_mode;
+   /**
+    * Sets the async processing mode
+    */
+   PROCEDURE set_async_mode (p_async BOOLEAN)
+   IS
+   BEGIN
+       g_async_mode := p_async;
+   END set_async_mode;
 
-    /**
-     * Gets the current trace ID
-     */
-    FUNCTION get_current_trace_id
-        RETURN VARCHAR2
-    IS
-    BEGIN
-        RETURN g_current_trace_id;
-    END get_current_trace_id;
+   /**
+    * Gets the current trace ID
+    */
+   FUNCTION get_current_trace_id
+       RETURN VARCHAR2
+   IS
+   BEGIN
+       RETURN g_current_trace_id;
+   END get_current_trace_id;
 
-    /**
-     * Gets the current span ID
-     */
-    FUNCTION get_current_span_id
-        RETURN VARCHAR2
-    IS
-    BEGIN
-        RETURN g_current_span_id;
-    END get_current_span_id;
+   /**
+    * Gets the current span ID
+    */
+   FUNCTION get_current_span_id
+       RETURN VARCHAR2
+   IS
+   BEGIN
+       RETURN g_current_span_id;
+   END get_current_span_id;
 
 END PLTelemetry;
 /

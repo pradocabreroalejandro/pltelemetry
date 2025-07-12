@@ -506,5 +506,24 @@ AS
     FUNCTION get_current_tenant_name
         RETURN VARCHAR2;
 
+    --------------------------------------------------------------------------
+    -- STRING UTILITIES
+    --------------------------------------------------------------------------
+
+    /**
+    * Normalize input strings for safe processing
+    * Removes leading/trailing spaces and null terminators from Forms
+    * 
+    * @param p_input Input string to normalize
+    * @param p_max_length Maximum allowed length (default 4000)
+    * @param p_allow_null Whether to allow NULL values (default TRUE)
+    * @return Normalized string
+    */
+    FUNCTION normalize_string(
+        p_input      VARCHAR2,
+        p_max_length NUMBER DEFAULT 4000,
+        p_allow_null BOOLEAN DEFAULT TRUE
+    ) RETURN VARCHAR2;
+
 END PLTelemetry;
 /

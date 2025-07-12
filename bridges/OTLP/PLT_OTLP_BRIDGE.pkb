@@ -701,8 +701,8 @@ AS
                 l_event_obj JSON_OBJECT_T;
                 l_event_name VARCHAR2(255);
                 l_event_time VARCHAR2(50);
-                l_event_attrs VARCHAR2(4000);  -- ← AÑADIR DECLARACIÓN
-                l_attrs_otlp CLOB;              -- ← AÑADIR DECLARACIÓN
+                l_event_attrs VARCHAR2(4000);  
+                l_attrs_otlp CLOB;          
             BEGIN
                 l_events_arr := JSON_ARRAY_T.parse(l_events_json);
                 
@@ -710,12 +710,17 @@ AS
                     l_event_obj := JSON_OBJECT_T(l_events_arr.get(i));
                     l_event_name := l_event_obj.get_string('name');
                     l_event_time := l_event_obj.get_string('time');
-                    l_event_attrs := l_event_obj.get_string('attributes');  -- ✅ YA LO TIENES
+                    l_event_attrs := NVL(l_event_obj.get_string('attributes'), '{}');
+
+                    IF g_debug_mode THEN
+                        DBMS_OUTPUT.PUT_LINE('=== EVENT DEBUG ===');
+                        DBMS_OUTPUT.PUT_LINE('Event: ' || l_event_name);
+                        DBMS_OUTPUT.PUT_LINE('Attributes JSON: ' || NVL(l_event_attrs, 'NULL'));
+                        DBMS_OUTPUT.PUT_LINE('Attributes length: ' || NVL(LENGTH(l_event_attrs), 0));
+                    END IF;
                     
-                    -- ← CONVERTIR ATTRIBUTES
                     l_attrs_otlp := convert_attributes_to_otlp(l_event_attrs);
                     
-                    -- ← USAR ATTRIBUTES REALES EN LUGAR DE []
                     l_events_array.append(JSON_OBJECT_T('{
                         "timeUnixNano": "' || to_unix_nano(l_event_time) || '",
                         "name": "' || escape_json_string(l_event_name) || '",
