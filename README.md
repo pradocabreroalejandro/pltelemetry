@@ -170,7 +170,7 @@ END process_order;
 ## Architecture
 
 <p align="center">
-  <img src="assets/PLT_logo.jpg" alt="PLTelemetry logo" width="200"/>
+  <img src="assets/architecture.png" alt="Architecture"/>
 </p>
 
 
