@@ -1,10 +1,10 @@
 CREATE OR REPLACE PACKAGE PLTelemetry
 AS
     -- OpenTelemetry SDK for PL/SQL
-    -- Version: 0.2
+    -- Version: 0.3.0
     -- Description: Provides distributed tracing capabilities for PL/SQL applications
     --              following OpenTelemetry standards
-    -- Requirements: Oracle 12c+ (native JSON support required)
+    -- Requirements: Oracle 12c+ (native JSON support)
 
     --------------------------------------------------------------------------
     -- TYPE DEFINITIONS
@@ -47,6 +47,10 @@ AS
     g_current_trace_id              VARCHAR2 (32);
     g_current_span_id               VARCHAR2 (16);
 
+    -- Current tenant context
+    g_current_tenant_id             VARCHAR2 (100);
+    g_current_tenant_name           VARCHAR2 (255);
+
     -- Configuration parameters
     g_autocommit                    BOOLEAN := FALSE;
     g_backend_url                   VARCHAR2 (500) := 'http://your-backend:3000/plsql-otel/telemetry';
@@ -55,8 +59,17 @@ AS
     g_async_mode                    BOOLEAN := TRUE;
 
     --------------------------------------------------------------------------
-    -- CORE TRACING FUNCTIONS
+    -- CORE ID GENERATION
     --------------------------------------------------------------------------
+
+    /**
+     * Generates a random ID of specified byte length using Oracle 12c+ features
+     * 
+     * @param p_bytes Number of bytes (8 or 16)
+     * @return Hex string representation of the random ID
+     */
+    FUNCTION generate_id (p_bytes IN NUMBER)
+        RETURN VARCHAR2;
 
     /**
      * Generates a 128-bit trace ID following OpenTelemetry spec
@@ -66,7 +79,19 @@ AS
      *   l_trace_id := PLTelemetry.generate_trace_id();
      */
     FUNCTION generate_trace_id
-       RETURN VARCHAR2;
+        RETURN VARCHAR2;
+
+    /**
+     * Generates a 64-bit span ID following OpenTelemetry spec
+     *
+     * @return 16 character hex string span ID
+     */
+    FUNCTION generate_span_id
+        RETURN VARCHAR2;
+
+    --------------------------------------------------------------------------
+    -- TRACE MANAGEMENT
+    --------------------------------------------------------------------------
 
     /**
      * Starts a new trace with the given operation name
@@ -85,6 +110,39 @@ AS
      * @param p_trace_id Optional trace ID to end (uses current if not provided)
      */
     PROCEDURE end_trace (p_trace_id VARCHAR2 DEFAULT NULL);
+
+    /**
+     * Continue an existing trace from an external system
+     * Use this when receiving a trace_id from Forms or other systems
+     *
+     * @param p_trace_id The trace ID from the external system (Forms, etc.)
+     * @param p_operation The operation name for this part of the trace
+     * @param p_tenant_id Optional tenant identifier for multi-tenancy
+     * @return The span ID for this operation
+     * @example
+     *   l_span_id := PLTelemetry.continue_distributed_trace('abc123...', 'process_order_db', 'tenant_001');
+     */
+    FUNCTION continue_distributed_trace(
+        p_trace_id   VARCHAR2,
+        p_operation  VARCHAR2,
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2;
+
+    /**
+     * Get trace context for passing to external systems
+     * Returns JSON with trace_id, span_id, and tenant info
+     *
+     * @return JSON string with trace context
+     * @example
+     *   l_context := PLTelemetry.get_trace_context();
+     *   -- Returns: {"trace_id":"abc123...", "span_id":"def456...", "tenant_id":"tenant_001"}
+     */
+    FUNCTION get_trace_context
+        RETURN VARCHAR2;
+
+    --------------------------------------------------------------------------
+    -- SPAN MANAGEMENT
+    --------------------------------------------------------------------------
 
     /**
      * Starts a new span within a trace
@@ -121,6 +179,87 @@ AS
      */
     PROCEDURE add_event (p_span_id VARCHAR2, p_event_name VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
 
+    --------------------------------------------------------------------------
+    -- LOGGING FUNCTIONS
+    --------------------------------------------------------------------------
+
+    /**
+     * Logs with explicit trace context (cross-system correlation)
+     * Use when you receive trace_id from external systems (Angular, etc.)
+     *
+     * @param p_trace_id The trace ID from external system
+     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
+     * @param p_message Log message content
+     * @param p_attributes Optional attributes for the log
+     */
+    PROCEDURE log_with_trace (p_trace_id      VARCHAR2,
+                              p_level         VARCHAR2,
+                              p_message       VARCHAR2,
+                              p_attributes    t_attributes DEFAULT t_attributes ());
+
+    /**
+     * Logs attached to an active span (span-contextual logging)
+     * Use when you're inside a span and want logs correlated to that span
+     *
+     * @param p_span_id The active span ID
+     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
+     * @param p_message Log message content
+     * @param p_attributes Optional attributes for the log
+     */
+    PROCEDURE add_log (p_span_id       VARCHAR2,
+                       p_level         VARCHAR2,
+                       p_message       VARCHAR2,
+                       p_attributes    t_attributes DEFAULT t_attributes ());
+
+    /**
+     * Standalone logs without trace context (general purpose logging)
+     * Use for background jobs, startup messages, or general application logs
+     *
+     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
+     * @param p_message Log message content
+     * @param p_attributes Optional attributes for the log
+     */
+    PROCEDURE log_message (p_level VARCHAR2, p_message VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
+
+    /**
+     * Log with distributed trace context
+     * Use this for logging that should be correlated across systems
+     *
+     * @param p_trace_id The distributed trace ID
+     * @param p_level Log level
+     * @param p_message Log message
+     * @param p_system Source system identifier (Forms, PLSQL, etc.)
+     * @param p_tenant_id Optional tenant identifier
+     */
+    PROCEDURE log_distributed(
+        p_trace_id   VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_system     VARCHAR2 DEFAULT 'PLSQL',
+        p_tenant_id  VARCHAR2 DEFAULT NULL
+    );
+
+    /**
+     * Internal helper to build and send log JSON
+     * 
+     * @param p_trace_id Optional trace ID for correlation
+     * @param p_span_id Optional span ID for correlation
+     * @param p_level Log severity level
+     * @param p_message Log message content
+     * @param p_attributes Additional log attributes
+     */
+    PROCEDURE send_log_internal(
+        p_trace_id   VARCHAR2,
+        p_span_id    VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_attributes t_attributes
+    );
+
+    --------------------------------------------------------------------------
+    -- METRICS
+    --------------------------------------------------------------------------
+
     /**
      * Records a metric value with associated metadata
      *
@@ -137,7 +276,7 @@ AS
                           p_attributes     t_attributes DEFAULT t_attributes ());
 
     --------------------------------------------------------------------------
-    -- UTILITY FUNCTIONS
+    -- ATTRIBUTES AND JSON UTILITIES
     --------------------------------------------------------------------------
 
     /**
@@ -164,12 +303,75 @@ AS
         RETURN VARCHAR2;
 
     /**
+     * Validate attribute key follows OpenTelemetry naming conventions
+     *
+     * @param p_key Attribute key to validate
+     * @return TRUE if valid, FALSE otherwise
+     */
+    FUNCTION validate_attribute_key(p_key VARCHAR2) 
+        RETURN BOOLEAN;
+
+    /**
+     * Extract value from JSON using native Oracle JSON functions
+     *
+     * @param p_json JSON string
+     * @param p_key Key to extract
+     * @return Value as VARCHAR2
+     */
+    FUNCTION get_json_value (p_json VARCHAR2, p_key VARCHAR2)
+        RETURN VARCHAR2;
+
+    /**
+     * Extract JSON object from JSON using native Oracle JSON functions
+     *
+     * @param p_json JSON string
+     * @param p_key Key to extract
+     * @return JSON object as VARCHAR2
+     */
+    FUNCTION get_json_object (p_json VARCHAR2, p_key VARCHAR2)
+        RETURN VARCHAR2;
+
+    /**
+     * Convert attributes to OTLP format using native Oracle JSON
+     *
+     * @param p_attrs_json JSON string with attributes
+     * @return CLOB with OTLP-formatted attributes
+     */
+    FUNCTION convert_attributes_to_otlp(p_attrs_json VARCHAR2)
+        RETURN CLOB;
+
+    --------------------------------------------------------------------------
+    -- BACKEND COMMUNICATION
+    --------------------------------------------------------------------------
+
+    /**
      * Sends telemetry data to the configured backend
      *
      * @param p_json JSON payload to send
      * @note Uses async mode by default, falls back to sync on failure
      */
     PROCEDURE send_to_backend (p_json VARCHAR2);
+
+    /**
+     * Sends telemetry data synchronously via HTTP
+     * 
+     * @param p_json JSON payload to send to backend
+     */
+    PROCEDURE send_to_backend_sync (p_json VARCHAR2);
+
+    /**
+     * Processes queued telemetry data in batches
+     *
+     * @param p_batch_size Number of queue entries to process (default 100)
+     * @note Should be called periodically by a scheduled job
+     * @example
+     *   PLTelemetry.process_queue(500);
+     */
+    PROCEDURE process_queue (p_batch_size NUMBER DEFAULT 100);
+
+    --------------------------------------------------------------------------
+    -- SESSION CONTEXT MANAGEMENT
+    --------------------------------------------------------------------------
 
     /**
      * Sets the current trace context in Oracle session info
@@ -184,14 +386,18 @@ AS
     PROCEDURE clear_trace_context;
 
     /**
-     * Processes queued telemetry data in batches
+     * Private setters for internal state management
+     * Use these instead of directly modifying global variables
      *
-     * @param p_batch_size Number of queue entries to process (default 100)
-     * @note Should be called periodically by a scheduled job
-     * @example
-     *   PLTelemetry.process_queue(500);
+     * @param p_trace_id New trace ID to set
+     * @param p_span_id New span ID to set
      */
-    PROCEDURE process_queue (p_batch_size NUMBER DEFAULT 100);
+    PROCEDURE set_internal_trace_context(p_trace_id VARCHAR2, p_span_id VARCHAR2);
+
+    /**
+     * Clears internal trace context variables
+     */
+    PROCEDURE clear_internal_trace_context;
 
     --------------------------------------------------------------------------
     -- CONFIGURATION GETTERS AND SETTERS
@@ -265,130 +471,40 @@ AS
         RETURN VARCHAR2;
 
     --------------------------------------------------------------------------
-    -- LOGGING FUNCTIONS
+    -- TENANT CONTEXT MANAGEMENT
     --------------------------------------------------------------------------
 
     /**
-     * Logs with explicit trace context (cross-system correlation)
-     * Use when you receive trace_id from external systems (Angular, etc.)
+     * Sets the tenant context for the current session
+     * All subsequent telemetry will automatically include tenant information
      *
-     * @param p_trace_id The trace ID from external system
-     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
-     * @param p_message Log message content
-     * @param p_attributes Optional attributes for the log
-     */
-    PROCEDURE log_with_trace (p_trace_id      VARCHAR2,
-                              p_level         VARCHAR2,
-                              p_message       VARCHAR2,
-                              p_attributes    t_attributes DEFAULT t_attributes ());
-
-    /**
-     * Logs attached to an active span (span-contextual logging)
-     * Use when you're inside a span and want logs correlated to that span
-     *
-     * @param p_span_id The active span ID
-     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
-     * @param p_message Log message content
-     * @param p_attributes Optional attributes for the log
-     */
-    PROCEDURE add_log (p_span_id       VARCHAR2,
-                       p_level         VARCHAR2,
-                       p_message       VARCHAR2,
-                       p_attributes    t_attributes DEFAULT t_attributes ());
-
-    /**
-     * Standalone logs without trace context (general purpose logging)
-     * Use for background jobs, startup messages, or general application logs
-     *
-     * @param p_level Log level (DEBUG, INFO, WARN, ERROR, FATAL)
-     * @param p_message Log message content
-     * @param p_attributes Optional attributes for the log
-     */
-    PROCEDURE log_message (p_level VARCHAR2, p_message VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
-
-    --------------------------------------------------------------------------
-    -- DISTRIBUTED TRACING FUNCTIONS
-    --------------------------------------------------------------------------
-
-    /**
-     * Continue an existing trace from an external system
-     * Use this when receiving a trace_id from Forms or other systems
-     *
-     * @param p_trace_id The trace ID from the external system (Forms, etc.)
-     * @param p_operation The operation name for this part of the trace
-     * @param p_tenant_id Optional tenant identifier for multi-tenancy
-     * @return The span ID for this operation
+     * @param p_tenant_id Unique tenant identifier
+     * @param p_tenant_name Optional human-readable tenant name
      * @example
-     *   l_span_id := PLTelemetry.continue_distributed_trace('abc123...', 'process_order_db', 'tenant_001');
+     *   PLTelemetry.set_tenant_context('cliente1', 'Coca Cola');
      */
-    FUNCTION continue_distributed_trace(
-        p_trace_id   VARCHAR2,
-        p_operation  VARCHAR2,
-        p_tenant_id  VARCHAR2 DEFAULT NULL
-    ) RETURN VARCHAR2;
+    PROCEDURE set_tenant_context(p_tenant_id VARCHAR2, p_tenant_name VARCHAR2 DEFAULT NULL);
 
     /**
-     * Get trace context for passing to external systems
-     * Returns JSON with trace_id, span_id, and tenant info
-     *
-     * @return JSON string with trace context
-     * @example
-     *   l_context := PLTelemetry.get_trace_context();
-     *   -- Returns: {"trace_id":"abc123...", "span_id":"def456...", "tenant_id":"tenant_001"}
+     * Clears the tenant context for the current session
      */
-    FUNCTION get_trace_context
-    RETURN VARCHAR2;
+    PROCEDURE clear_tenant_context;
 
     /**
-     * Log with distributed trace context
-     * Use this for logging that should be correlated across systems
+     * Gets the current tenant ID
      *
-     * @param p_trace_id The distributed trace ID
-     * @param p_level Log level
-     * @param p_message Log message
-     * @param p_system Source system identifier (Forms, PLSQL, etc.)
-     * @param p_tenant_id Optional tenant identifier
+     * @return Current tenant ID or NULL if no tenant context set
      */
-    PROCEDURE log_distributed(
-        p_trace_id   VARCHAR2,
-        p_level      VARCHAR2,
-        p_message    VARCHAR2,
-        p_system     VARCHAR2 DEFAULT 'PLSQL',
-        p_tenant_id  VARCHAR2 DEFAULT NULL
-    );
-
-    --------------------------------------------------------------------------
-    -- JSON UTILITY FUNCTIONS (Native Oracle 12c+ only)
-    --------------------------------------------------------------------------
-
-    /**
-     * Extract value from JSON using native Oracle JSON functions
-     *
-     * @param p_json JSON string
-     * @param p_key Key to extract
-     * @return Value as VARCHAR2
-     */
-    FUNCTION get_json_value (p_json VARCHAR2, p_key VARCHAR2)
+    FUNCTION get_current_tenant_id
         RETURN VARCHAR2;
 
     /**
-     * Extract JSON object from JSON using native Oracle JSON functions
+     * Gets the current tenant name
      *
-     * @param p_json JSON string
-     * @param p_key Key to extract
-     * @return JSON object as VARCHAR2
+     * @return Current tenant name or NULL if no tenant context set
      */
-    FUNCTION get_json_object (p_json VARCHAR2, p_key VARCHAR2)
+    FUNCTION get_current_tenant_name
         RETURN VARCHAR2;
-
-    /**
-     * Validate attribute key follows OpenTelemetry naming conventions
-     *
-     * @param p_key Attribute key to validate
-     * @return TRUE if valid, FALSE otherwise
-     */
-    FUNCTION validate_attribute_key(p_key VARCHAR2) 
-        RETURN BOOLEAN;
 
 END PLTelemetry;
 /

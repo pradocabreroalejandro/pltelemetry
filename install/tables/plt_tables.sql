@@ -1,4 +1,4 @@
--- PLTelemetry Database Tables
+-- PLTelemetry Database Tables - Fixed Version
 -- This script creates all required tables for PLTelemetry
 -- 
 -- Tables created:
@@ -21,7 +21,8 @@ BEGIN
         SELECT table_name 
         FROM user_tables 
         WHERE table_name IN ('PLT_TRACES', 'PLT_SPANS', 'PLT_EVENTS', 'PLT_METRICS', 
-                            'PLT_FAILED_EXPORTS', 'PLT_QUEUE', 'PLT_TELEMETRY_ERRORS')
+                            'PLT_FAILED_EXPORTS', 'PLT_QUEUE', 'PLT_TELEMETRY_ERRORS',
+                            'PLT_LOGS', 'PLT_SPAN_ATTRIBUTES')
     ) LOOP
         l_sql := 'DROP TABLE ' || rec.table_name || ' CASCADE CONSTRAINTS';
         EXECUTE IMMEDIATE l_sql;
@@ -37,7 +38,8 @@ CREATE TABLE plt_traces (
     start_time TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     end_time TIMESTAMP WITH TIME ZONE,
     service_name VARCHAR2(100) DEFAULT 'oracle-plsql',
-    service_instance VARCHAR2(255)
+    service_instance VARCHAR2(255),
+    tenant_id VARCHAR2(100)
 );
 
 COMMENT ON TABLE plt_traces IS 'OpenTelemetry traces - root operations';
@@ -45,6 +47,7 @@ COMMENT ON COLUMN plt_traces.trace_id IS '128-bit trace ID (32 hex chars)';
 COMMENT ON COLUMN plt_traces.root_operation IS 'Name of the root operation';
 COMMENT ON COLUMN plt_traces.service_name IS 'Service identifier';
 COMMENT ON COLUMN plt_traces.service_instance IS 'Service instance identifier';
+COMMENT ON COLUMN plt_traces.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Spans table
 CREATE TABLE plt_spans (
@@ -56,6 +59,7 @@ CREATE TABLE plt_spans (
     end_time TIMESTAMP WITH TIME ZONE,
     duration_ms NUMBER,
     status VARCHAR2(50) DEFAULT 'RUNNING',
+    tenant_id VARCHAR2(100),
     CONSTRAINT fk_spans_trace FOREIGN KEY (trace_id) REFERENCES plt_traces(trace_id),
     CONSTRAINT fk_spans_parent FOREIGN KEY (parent_span_id) REFERENCES plt_spans(span_id),
     CONSTRAINT chk_spans_status CHECK (status IN ('RUNNING', 'OK', 'ERROR', 'CANCELLED'))
@@ -65,6 +69,7 @@ COMMENT ON TABLE plt_spans IS 'OpenTelemetry spans - individual operations withi
 COMMENT ON COLUMN plt_spans.span_id IS '64-bit span ID (16 hex chars)';
 COMMENT ON COLUMN plt_spans.parent_span_id IS 'Parent span for nested operations';
 COMMENT ON COLUMN plt_spans.duration_ms IS 'Span duration in milliseconds';
+COMMENT ON COLUMN plt_spans.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Events table
 CREATE TABLE plt_events (
@@ -73,11 +78,13 @@ CREATE TABLE plt_events (
     event_name VARCHAR2(255) NOT NULL,
     event_time TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     attributes VARCHAR2(4000),
+    tenant_id VARCHAR2(100),
     CONSTRAINT fk_events_span FOREIGN KEY (span_id) REFERENCES plt_spans(span_id)
 );
 
 COMMENT ON TABLE plt_events IS 'Events within spans - point-in-time occurrences';
 COMMENT ON COLUMN plt_events.attributes IS 'JSON attributes for the event';
+COMMENT ON COLUMN plt_events.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Metrics table
 CREATE TABLE plt_metrics (
@@ -89,6 +96,7 @@ CREATE TABLE plt_metrics (
     span_id VARCHAR2(16),
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     attributes VARCHAR2(4000),
+    tenant_id VARCHAR2(100),
     CONSTRAINT fk_metrics_trace FOREIGN KEY (trace_id) REFERENCES plt_traces(trace_id),
     CONSTRAINT fk_metrics_span FOREIGN KEY (span_id) REFERENCES plt_spans(span_id)
 );
@@ -96,6 +104,7 @@ CREATE TABLE plt_metrics (
 COMMENT ON TABLE plt_metrics IS 'Application metrics with telemetry context';
 COMMENT ON COLUMN plt_metrics.metric_unit IS 'Unit of measurement (ms, bytes, requests, etc.)';
 COMMENT ON COLUMN plt_metrics.attributes IS 'JSON attributes for the metric';
+COMMENT ON COLUMN plt_metrics.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Failed exports table
 CREATE TABLE plt_failed_exports (
@@ -105,11 +114,13 @@ CREATE TABLE plt_failed_exports (
     payload VARCHAR2(4000),
     error_message VARCHAR2(4000),
     retry_count NUMBER DEFAULT 0,
-    last_retry TIMESTAMP WITH TIME ZONE
+    last_retry TIMESTAMP WITH TIME ZONE,
+    tenant_id VARCHAR2(100)
 );
 
 COMMENT ON TABLE plt_failed_exports IS 'Failed telemetry export attempts for debugging';
 COMMENT ON COLUMN plt_failed_exports.payload IS 'Truncated payload that failed to export';
+COMMENT ON COLUMN plt_failed_exports.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Async processing queue
 CREATE TABLE plt_queue (
@@ -129,6 +140,7 @@ CREATE TABLE plt_queue (
     processed_time TIMESTAMP WITH TIME ZONE,
     last_error VARCHAR2(4000),
     last_attempt_time TIMESTAMP WITH TIME ZONE,
+    tenant_id VARCHAR2(100),
     CONSTRAINT pk_plt_queue PRIMARY KEY (queue_id),
     CONSTRAINT chk_plt_queue_processed CHECK (processed IN ('Y', 'N'))
 );
@@ -136,6 +148,7 @@ CREATE TABLE plt_queue (
 COMMENT ON TABLE plt_queue IS 'Async processing queue for telemetry export';
 COMMENT ON COLUMN plt_queue.payload IS 'JSON payload to be exported';
 COMMENT ON COLUMN plt_queue.process_attempts IS 'Number of processing attempts (max 3)';
+COMMENT ON COLUMN plt_queue.tenant_id IS 'Tenant identifier for multi-tenancy';
 
 -- Error logging table
 CREATE TABLE plt_telemetry_errors (
@@ -150,12 +163,15 @@ CREATE TABLE plt_telemetry_errors (
     session_user VARCHAR2(128) DEFAULT USER,
     os_user VARCHAR2(128) DEFAULT SYS_CONTEXT('USERENV', 'OS_USER'),
     host VARCHAR2(256) DEFAULT SYS_CONTEXT('USERENV', 'HOST'),
-    ip_address VARCHAR2(45) DEFAULT SYS_CONTEXT('USERENV', 'IP_ADDRESS')
+    ip_address VARCHAR2(45) DEFAULT SYS_CONTEXT('USERENV', 'IP_ADDRESS'),
+    tenant_id VARCHAR2(100)
 );
 
 COMMENT ON TABLE plt_telemetry_errors IS 'Internal error logging for PLTelemetry operations';
 COMMENT ON COLUMN plt_telemetry_errors.module_name IS 'PLTelemetry module where error occurred';
+COMMENT ON COLUMN plt_telemetry_errors.tenant_id IS 'Tenant identifier for multi-tenancy';
 
+-- Logs table
 CREATE TABLE plt_logs (
     log_id       NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     trace_id     VARCHAR2(32),
@@ -164,13 +180,28 @@ CREATE TABLE plt_logs (
     message      VARCHAR2(4000) NOT NULL,
     timestamp    TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
     attributes   VARCHAR2(4000) DEFAULT '{}',
-    created_at   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
+    created_at   TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    tenant_id    VARCHAR2(100)
 );
 
+COMMENT ON TABLE plt_logs IS 'Structured logs with optional trace correlation';
+COMMENT ON COLUMN plt_logs.trace_id IS 'Optional trace ID for correlation';
+COMMENT ON COLUMN plt_logs.span_id IS 'Optional span ID for correlation';
+COMMENT ON COLUMN plt_logs.log_level IS 'Log severity level';
+COMMENT ON COLUMN plt_logs.tenant_id IS 'Tenant identifier for multi-tenancy';
+
+-- Span attributes table (normalized attributes for better querying)
 CREATE TABLE plt_span_attributes (
     span_id         VARCHAR2(16) NOT NULL,
     attribute_key   VARCHAR2(255) NOT NULL,
     attribute_value VARCHAR2(4000),
-    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    tenant_id       VARCHAR2(100),
     CONSTRAINT plt_span_attr_pk PRIMARY KEY (span_id, attribute_key)
 );
+
+COMMENT ON TABLE plt_span_attributes IS 'Normalized span attributes for efficient querying';
+COMMENT ON COLUMN plt_span_attributes.span_id IS 'Reference to span (soft FK for flexibility)';
+COMMENT ON COLUMN plt_span_attributes.attribute_key IS 'Attribute key name';
+COMMENT ON COLUMN plt_span_attributes.attribute_value IS 'Attribute value (up to 4KB)';
+COMMENT ON COLUMN plt_span_attributes.tenant_id IS 'Tenant identifier for multi-tenancy';

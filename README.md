@@ -4,13 +4,15 @@
 
 # PLTelemetry
 
-> **OpenTelemetry-style observability for Oracle PL/SQL**
+> **Evolving observability for Oracle ecosystems**
+
+> PLTelemetry is a modern observability layer built specifically for Oracle environments — Forms, PL/SQL, and Reports — and designed to evolve.
 
 PLTelemetry brings distributed tracing, metrics, and structured logging to Oracle PL/SQL applications. It's designed to fill the observability gap where traditional OpenTelemetry agents can't reach - inside your database stored procedures, Oracle Forms, and Reports.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Oracle](https://img.shields.io/badge/Oracle-11g%2B-red.svg)
-![Status](https://img.shields.io/badge/status-production%20ready-green.svg)
+![Status](https://img.shields.io/badge/status-evolving%20rapidly-yellow.svg)
 ![Oracle Forms](https://img.shields.io/badge/Oracle%20Forms-supported-orange.svg)
 ![Distributed Tracing](https://img.shields.io/badge/distributed%20tracing-ready-green.svg)
 ![Not affiliated with Oracle](https://img.shields.io/badge/affiliation-independent-blueviolet?logo=oracle&logoColor=white)
@@ -29,6 +31,15 @@ The author is **not an Oracle employee, partner, or representative**, and this s
 
 This project is provided “**as is**”, without any warranty. Use at your own discretion and risk, especially in production environments.
 
+
+
+## 🚀 What's New
+
+- 🧱 **Native Oracle 12c+ JSON everywhere** – no legacy hacks
+- 🏷️ **Enterprise-grade Tenant Context** – trace and analyze per tenant
+- 🔄 **Bridge Architecture Expanded** – simplified backend routing to OTLP/Postgres
+- 🧠 **Improved real-world examples** – built from actual usage patterns
+- 🚀 **Continuously evolving** – aggressive roadmap, early feature access
 
 ## What It Does
 
@@ -158,16 +169,10 @@ END process_order;
 
 ## Architecture
 
-```
-Oracle Forms ━━━━━━━━━━━┓
-                      ┃
-Oracle Reports ━━━━━━━┫ PLTelemetry ━━━ OTLP Bridge ━━━ Tempo/Grafana
-                      ┃      ↓              ↓             ↓
-PL/SQL APIs ━━━━━━━━━━┛  Generic JSON    Transform   Distributed Tracing
-                                                    Metrics & Logs
-                         ↓
-              PostgreSQL Bridge ━━━ PostgreSQL ━━━ Custom Dashboards
-```
+<p align="center">
+  <img src="assets/PLT_logo.jpg" alt="PLTelemetry logo" width="200"/>
+</p>
+
 
 PLTelemetry generates OpenTelemetry-compatible JSON and uses "bridges" to send data to different observability platforms.
 
@@ -619,7 +624,7 @@ END;
 
 ### Database
 - Oracle Database 11g or higher (12c+ recommended for better JSON support)
-- Required privileges: `UTL_HTTP`, `DBMS_CRYPTO`, `CREATE TABLE`, `CREATE PROCEDURE`
+- Required privileges: `UTL_HTTP`, `CREATE TABLE`, `CREATE PROCEDURE`
 
 ### Network
 - HTTP access to your observability collector (Tempo, Jaeger, etc.)
@@ -633,7 +638,6 @@ END;
 ```sql
 -- Run as DBA
 GRANT EXECUTE ON UTL_HTTP TO your_plsql_user;
-GRANT EXECUTE ON DBMS_CRYPTO TO your_plsql_user;
 GRANT CREATE JOB TO your_plsql_user;
 
 -- ACL for outbound HTTP (Oracle 11g+)
@@ -711,12 +715,15 @@ END;
 - ✅ Multi-tenant support
 - ✅ Production deployments in enterprise environments
 
+
 **Roadmap:**
 - 🔄 Elasticsearch bridge for log analytics
-- 🔄 InfluxDB bridge for metrics storage
-- 🔄 Sampling strategies for high-volume environments
-- 🔄 gRPC support for better performance
-- 🔄 Oracle APEX integration
+- 📈 InfluxDB bridge for time-series metrics
+- 🧩 Dynamic sampling for high-throughput systems
+- 🛰️ gRPC and OTLP/HTTP v1 support
+- 🧠 AI-based anomaly detection hooks
+- 🖥️ Full Oracle APEX and REST Data Services (ORDS) integration
+
 
 ## Contributing
 
@@ -749,6 +756,139 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
 
-**PLTelemetry** - Because your Oracle ecosystem deserves modern observability.
+**PLTelemetry** - Because your Oracle stack deserves continuously evolving observability.
 
 *Distributed tracing • Metrics • Structured logging • Oracle Forms • PL/SQL • Reports*
+
+## 🧠 PLTelemetry Architecture Summary
+
+PLTelemetry is a distributed telemetry system for Oracle-based systems, with full support for legacy and modern workloads.
+
+### 🔧 Core Design Goals
+- Lightweight
+- Secure
+- Extensible
+- Easy to maintain
+- Ideal for both real usage and demos
+
+### 🧱 Core Components
+
+#### PLTelemetry (PL/SQL Core)
+- Generates spans and metrics directly from PL/SQL
+- Uses VARCHAR2/CLOB hybrid JSON builder
+- Stores telemetry in queue tables (staging layer)
+
+#### External Agent (Go)
+- Stateless binary that connects to Oracle
+- Reads telemetry queue, pushes to OTEL collector
+- Driven by Oracle-side configuration
+- Cross-platform (Windows/Linux), no dependencies
+- Secure: uses GPG-encrypted credentials via core env system
+
+#### OTEL Collector
+- Receives data and forwards to:
+  - Tempo (traces)
+  - Prometheus (metrics)
+  - Loki (future logs)
+
+#### Grafana
+- Central dashboard and alerting per tenant
+- Flexible tenant filtering and panels
+
+### 🔄 Data Flow & Failover Strategy
+
+```
+  Primary:   PL/SQL → Queue Table → Go Agent → OTEL Collector
+  Fallback:  PL/SQL → OTLP Bridge (UTL_HTTP) → OTEL Collector
+```
+
+- Binary decision logic: agent alive = use it; dead = fallback to bridge
+- All config lives in Oracle DB
+- Telemetry always persisted first → no data loss
+- No hybrid mode: clean failover behavior
+
+### 🔒 Oracle Security Model
+
+- Oracle DB does **not** access internet directly under normal flow
+- Go Agent is the only outbound component
+- Agent can be monitored using OTLP Bridge health checks
+- Credentials are encrypted and managed externally
+
+### ❤️ Designed for Enterprise Multi-Tenant Environments
+
+- Trace context includes `tenant_id` for filtering
+- Dashboards per tenant in Grafana
+- Custom alerts and routing possible using OTEL labels
+
+
+### 🔐 Example: Tenant-Aware Tracing with Context
+
+```sql
+DECLARE
+    l_trace_id VARCHAR2(32);
+    l_span_id  VARCHAR2(16);
+BEGIN
+    -- Distributed trace including tenant ID
+    l_trace_id := PLTelemetry.start_trace('invoice_generation');
+
+    -- Span with tenant-specific operation
+    l_span_id := PLTelemetry.continue_distributed_trace(
+        p_trace_id  => l_trace_id,
+        p_operation => 'generate_pdf',
+        p_tenant_id => 'tenant_42'
+    );
+
+    -- Add event
+    PLTelemetry.add_event(l_span_id, 'rendering_started');
+
+    -- Business logic...
+    generate_invoice_pdf();
+
+    -- Complete the span
+    PLTelemetry.end_span(l_span_id, 'OK');
+    PLTelemetry.end_trace(l_trace_id);
+END;
+/
+```
+
+
+### ⚙️ Example: Background Job Tracing
+
+```sql
+BEGIN
+    -- Called by DBMS_SCHEDULER or batch job
+    DECLARE
+        l_trace_id VARCHAR2(32) := PLTelemetry.start_trace('daily_cleanup');
+        l_span_id  VARCHAR2(16) := PLTelemetry.start_span('remove_stale_records');
+    BEGIN
+        DELETE FROM temp_data WHERE created_at < SYSDATE - 7;
+        PLTelemetry.log_metric('records.deleted', SQL%ROWCOUNT, 'rows');
+        PLTelemetry.end_span(l_span_id, 'OK');
+        PLTelemetry.end_trace(l_trace_id);
+    EXCEPTION
+        WHEN OTHERS THEN
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            PLTelemetry.end_trace(l_trace_id);
+    END;
+END;
+/
+```
+
+
+### ⚡ Example: Minimal Single-Span Tracing with Metric
+
+```sql
+DECLARE
+    l_span_id VARCHAR2(16);
+BEGIN
+    l_span_id := PLTelemetry.start_span('calc_discount');
+
+    -- Simulate operation
+    apply_customer_discount(p_customer_id);
+
+    -- Metric and close
+    PLTelemetry.log_metric('discounts_applied', 1, 'count');
+    PLTelemetry.end_span(l_span_id, 'OK');
+END;
+/
+```
