@@ -1,9 +1,9 @@
 #!/bin/bash
 # =============================================================================
-# PLTelemetry Service Status Dashboard - Import Script
+# PLTelemetry Service Status Dashboard - CLEAN FIXED VERSION
 # 
-# Usage: ./import_dashboard.sh <grafana_password>
-# Example: ./import_dashboard.sh mySecretPassword123
+# Usage: ./import_dashboard_clean.sh <grafana_password>
+# Example: ./import_dashboard_clean.sh admin
 # =============================================================================
 
 # Check if password parameter was provided
@@ -11,7 +11,7 @@ if [ $# -eq 0 ]; then
     echo "❌ Error: Grafana password required"
     echo ""
     echo "Usage: $0 <grafana_password>"
-    echo "Example: $0 mySecretPassword123"
+    echo "Example: $0 admin"
     echo ""
     echo "🔒 Security note: Password is passed as parameter to avoid hardcoding"
     exit 1
@@ -21,12 +21,12 @@ GRAFANA_URL="http://localhost:3020"
 GRAFANA_USER="admin"
 GRAFANA_PASS="$1"
 
-echo "🎯 Importing PLTelemetry Service Status Dashboard..."
+echo "🎯 Importing PLTelemetry Service Status Dashboard (CLEAN VERSION)..."
 echo "🔐 Using provided password for user: $GRAFANA_USER"
 echo "=================================================="
-echo "📋 Dynamic table with automatic services"
+echo "📋 Single query table - NO duplicates"
 echo "🟢 Up/Down status with colors"
-echo "⏱️ Response times included"
+echo "⏱️ Response times in separate panel"
 echo "🔄 Auto-refresh every 30s"
 echo ""
 
@@ -67,11 +67,11 @@ else
     exit 1
 fi
 
-# PLTelemetry Service Status Dashboard
+# PLTelemetry Service Status Dashboard - CLEAN VERSION
 PLT_SERVICE_DASHBOARD='{
   "dashboard": {
     "id": null,
-    "title": "🎯 PLTelemetry - Service Status",
+    "title": "🎯 PLTelemetry - Service Status (Clean)",
     "tags": ["pltelemetry", "services", "status", "monitoring"],
     "style": "dark",
     "timezone": "browser",
@@ -84,277 +84,136 @@ PLT_SERVICE_DASHBOARD='{
     "refresh": "30s",
     "panels": [
       {
-        "id": 1,
-        "title": "Service Status Overview",
-        "type": "table",
-        "gridPos": {
-          "h": 12,
-          "w": 24,
-          "x": 0,
-          "y": 0
+  "id": 1,
+  "title": "🎯 Service Status & Performance",
+  "type": "table",
+  "gridPos": {
+    "h": 12,
+    "w": 24,
+    "x": 0,
+    "y": 0
+  },
+  "targets": [
+    {
+      "expr": "max by (service_name, criticality, endpoint_port, tenant_id) (pltelemetry_service_status_gauge)",
+      "format": "table",
+      "instant": true,
+      "refId": "A"
+    },
+    {
+      "expr": "max by (service_name) (pltelemetry_service_response_time_milliseconds)",
+      "format": "table",
+      "instant": true,
+      "refId": "B"
+    }
+  ],
+  "transformations": [
+    {
+      "id": "joinByField",
+      "options": {
+        "byField": "service_name",
+        "mode": "outer"
+      }
+    },
+    {
+      "id": "organize",
+      "options": {
+        "excludeByName": {
+          "__name__": true,
+          "Time": true,
+          "Time 1": true,
+          "Time 2": true,
+          "instance": true,
+          "job": true,
+          "otel_scope_name": true,
+          "otel_scope_schema_url": true,
+          "otel_scope_version": true
         },
-        "targets": [
+        "renameByName": {
+          "service_name": "Service Name",
+          "Value #A": "Status",
+          "Value #B": "Response Time",
+          "criticality": "Criticality",
+          "endpoint_port": "Port",
+          "tenant_id": "Tenant"
+        }
+      }
+    }
+  ],
+  "fieldConfig": {
+    "defaults": {
+      "custom": {
+        "align": "left",
+        "displayMode": "auto",
+        "filterable": true
+      }
+    },
+    "overrides": [
+      {
+        "matcher": {
+          "id": "byName",
+          "options": "Status"
+        },
+        "properties": [
           {
-            "expr": "pltelemetry_service_status_gauge",
-            "format": "table",
-            "instant": true,
-            "refId": "A"
+            "id": "custom.displayMode",
+            "value": "color-background"
           },
           {
-            "expr": "pltelemetry_service_response_time_ms_milliseconds",
-            "format": "table",
-            "instant": true,
-            "refId": "B"
-          }
-        ],
-        "transformations": [
-          {
-            "id": "joinByField",
-            "options": {
-              "byField": "service_name",
-              "mode": "outer"
-            }
-          },
-          {
-            "id": "organize",
-            "options": {
-              "excludeByName": {
-                "__name__": true,
-                "criticality 1": true,
-                "criticality 2": true,
-                "endpoint_port 1": true,
-                "endpoint_port 2": true,
-                "exported_instance": true,
-                "exported_job": true,
-                "instance": true,
-                "job": true,
-                "otel_scope_name": true,
-                "otel_scope_version": true,
-                "source": true,
-                "Time": true,
-                "Time 1": true,
-                "Time 2": true
-              },
-              "indexByName": {
-                "service_name": 0,
-                "Value #A": 1,
-                "criticality": 2,
-                "endpoint_port": 3,
-                "Value #B": 4
-              },
-              "renameByName": {
-                "service_name": "Service Name",
-                "Value #A": "Status",
-                "Value #B": "Response Time (ms)",
-                "criticality": "Criticality",
-                "endpoint_port": "Port"
-              }
-            }
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "custom": {
-              "align": "left",
-              "displayMode": "auto",
-              "filterable": true
-            },
-            "mappings": [
+            "id": "mappings",
+            "value": [
               {
                 "options": {
                   "0": {
                     "color": "red",
-                    "index": 0,
-                    "text": "🔴 DOWN"
+                    "text": "DOWN"
                   },
                   "1": {
                     "color": "green",
-                    "index": 1,
-                    "text": "🟢 UP"
+                    "text": "UP"
                   }
                 },
                 "type": "value"
               }
-            ],
-            "color": {
-              "mode": "thresholds"
-            },
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {
-                  "color": "red",
-                  "value": null
-                },
-                {
-                  "color": "green",
-                  "value": 1
-                }
-              ]
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Service Name"
-              },
-              "properties": [
-                {
-                  "id": "custom.width",
-                  "value": 200
-                },
-                {
-                  "id": "custom.align",
-                  "value": "left"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Status"
-              },
-              "properties": [
-                {
-                  "id": "custom.width",
-                  "value": 120
-                },
-                {
-                  "id": "custom.align",
-                  "value": "center"
-                },
-                {
-                  "id": "custom.displayMode",
-                  "value": "color-background"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Response Time (ms)"
-              },
-              "properties": [
-                {
-                  "id": "custom.width",
-                  "value": 150
-                },
-                {
-                  "id": "custom.align",
-                  "value": "right"
-                },
-                {
-                  "id": "unit",
-                  "value": "ms"
-                },
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "thresholds"
-                  }
-                },
-                {
-                  "id": "thresholds",
-                  "value": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "color": "green",
-                        "value": null
-                      },
-                      {
-                        "color": "yellow",
-                        "value": 100
-                      },
-                      {
-                        "color": "orange",
-                        "value": 500
-                      },
-                      {
-                        "color": "red",
-                        "value": 1000
-                      }
-                    ]
-                  }
-                },
-                {
-                  "id": "custom.displayMode",
-                  "value": "color-background"
-                },
-                {
-                  "id": "decimals",
-                  "value": 2
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Criticality"
-              },
-              "properties": [
-                {
-                  "id": "custom.width",
-                  "value": 100
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "options": {
-                        "HIGH": {
-                          "color": "red",
-                          "index": 0,
-                          "text": "🔥 HIGH"
-                        },
-                        "MEDIUM": {
-                          "color": "orange",
-                          "index": 1,
-                          "text": "⚠️ MEDIUM"
-                        },
-                        "LOW": {
-                          "color": "yellow",
-                          "index": 2,
-                          "text": "⚡ LOW"
-                        },
-                        "VERY_LOW": {
-                          "color": "blue",
-                          "index": 3,
-                          "text": "ℹ️ VERY_LOW"
-                        }
-                      },
-                      "type": "value"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "showHeader": true,
-          "sortBy": [
-            {
-              "desc": false,
-              "displayName": "Service Name"
-            }
-          ]
-        }
+            ]
+          }
+        ]
       },
       {
+        "matcher": {
+          "id": "byName",
+          "options": "Response Time"
+        },
+        "properties": [
+          {
+            "id": "unit",
+            "value": "ms"
+          },
+          {
+            "id": "custom.displayMode",
+            "value": "color-background"
+          }
+        ]
+      }
+    ]
+  },
+  "options": {
+    "showHeader": true
+  }
+},
+      {
         "id": 2,
-        "title": "Response Time Evolution (Last 15 min)",
+        "title": "📈 Response Time Evolution (Last 15 min)",
         "type": "timeseries",
         "gridPos": {
           "h": 8,
           "w": 24,
           "x": 0,
-          "y": 12
+          "y": 18
         },
         "targets": [
           {
-            "expr": "pltelemetry_service_response_time_ms_milliseconds > -1",
+            "expr": "max by (service_name) (pltelemetry_service_response_time_milliseconds)",
             "legendFormat": "{{service_name}}",
             "refId": "A"
           }
@@ -365,34 +224,16 @@ PLT_SERVICE_DASHBOARD='{
               "mode": "palette-classic"
             },
             "custom": {
-              "axisLabel": "",
+              "axisLabel": "Response Time",
               "axisPlacement": "auto",
-              "barAlignment": 0,
               "drawStyle": "line",
               "fillOpacity": 10,
-              "gradientMode": "none",
-              "hideFrom": {
-                "legend": false,
-                "tooltip": false,
-                "vis": false
-              },
-              "lineInterpolation": "linear",
               "lineWidth": 2,
               "pointSize": 5,
-              "scaleDistribution": {
-                "type": "linear"
-              },
               "showPoints": "never",
-              "spanNulls": false,
-              "stacking": {
-                "group": "A",
-                "mode": "none"
-              },
-              "thresholdsStyle": {
-                "mode": "off"
-              }
+              "spanNulls": false
             },
-            "mappings": [],
+            "unit": "ms",
             "thresholds": {
               "mode": "absolute",
               "steps": [
@@ -413,48 +254,50 @@ PLT_SERVICE_DASHBOARD='{
                   "value": 500
                 }
               ]
-            },
-            "unit": "ms"
-          },
-          "overrides": []
+            }
+          }
         },
         "options": {
           "legend": {
-            "calcs": [],
+            "calcs": ["lastNotNull", "max", "mean"],
             "displayMode": "table",
             "placement": "right"
           },
           "tooltip": {
-            "mode": "single",
-            "sort": "none"
+            "mode": "multi",
+            "sort": "desc"
           }
         }
       }
     ]
   },
   "folderId": null,
-  "message": "PLTelemetry Service Status Dashboard - Dynamic services from metrics with response times",
+  "message": "PLTelemetry Service Status Dashboard - Clean version with separate panels",
   "overwrite": true
 }'
 
-echo "📊 Importing dashboard..."
+echo "📊 Importing clean dashboard..."
 IMPORT_RESULT=$(grafana_api "POST" "dashboards/db" "$PLT_SERVICE_DASHBOARD")
 
 # Check if import was successful
 if echo "$IMPORT_RESULT" | grep -q "success"; then
     DASHBOARD_UID=$(echo "$IMPORT_RESULT" | grep -o '"uid":"[^"]*"' | cut -d'"' -f4)
     echo ""
-    echo "🎉 PLTelemetry Service Dashboard imported successfully!"
-    echo "===================================================="
-    echo "📋 Dynamic table: ✅"
+    echo "🎉 PLTelemetry CLEAN Service Dashboard imported successfully!"
+    echo "================================================================="
+    echo "📋 Service Status table: ✅ (NO duplicates)"
+    echo "⏱️ Response Times table: ✅ (sorted by time)"
+    echo "📈 Evolution chart: ✅ (clean lines per service)"
     echo "🔄 Auto-refresh 30s: ✅"
-    echo "🎨 Status colors: ✅"
-    echo "⏱️ Response times with colors: ✅"
-    echo "📈 Evolution chart (15min): ✅"
-    echo "📊 Queries: status + response_time_ms (filtered > -1)"
+    echo "🎨 Color coding: ✅"
     echo ""
     echo "🌐 Dashboard URL: $GRAFANA_URL/d/$DASHBOARD_UID"
     echo "📋 Dashboard UID: $DASHBOARD_UID"
+    echo ""
+    echo "🎯 Layout:"
+    echo "   - Top: Service Status (UP/DOWN + Criticality)"
+    echo "   - Middle: Response Times (sorted by slowest first)"
+    echo "   - Bottom: Time series chart (trends)"
 else
     echo "❌ Import error:"
     echo "$IMPORT_RESULT"
@@ -464,4 +307,3 @@ else
     echo "   - Verify Prometheus datasource is configured in Grafana"
     echo "   - Ensure metrics are being scraped from OTEL collector"
 fi
-

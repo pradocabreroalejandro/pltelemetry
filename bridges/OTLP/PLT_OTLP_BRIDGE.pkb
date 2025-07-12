@@ -395,26 +395,22 @@ AS
     IS
         l_pattern VARCHAR2(100);
     BEGIN
-        -- Check configured mappings
+        -- Check configured mappings FIRST (highest priority)
         l_pattern := g_metric_type_mappings.FIRST;
         WHILE l_pattern IS NOT NULL LOOP
-            IF p_metric_name LIKE REPLACE(l_pattern, '%', '%') THEN
+            IF p_metric_name LIKE l_pattern THEN  -- Ya no necesitas REPLACE
                 RETURN g_metric_type_mappings(l_pattern);
             END IF;
             l_pattern := g_metric_type_mappings.NEXT(l_pattern);
         END LOOP;
         
-        -- Default heuristics for Grafana compatibility
-        IF INSTR(LOWER(p_metric_name), 'total') > 0 OR 
-           INSTR(LOWER(p_metric_name), 'count') > 0 OR
-           INSTR(LOWER(p_metric_name), 'requests') > 0 THEN
-            RETURN 'counter';
-        ELSIF INSTR(LOWER(p_metric_name), 'duration') > 0 OR 
-              INSTR(LOWER(p_metric_name), 'latency') > 0 OR
-              INSTR(LOWER(p_metric_name), 'time') > 0 THEN
-            RETURN 'histogram';
+        -- Intelligent heuristics (fallback)
+        IF REGEXP_LIKE(p_metric_name, '(total|count|requests|processed|sent|received)$', 'i') THEN
+            RETURN 'counter';  -- Things that accumulate
+        ELSIF REGEXP_LIKE(p_metric_name, '(bucket|_p\d+|percentile)', 'i') THEN
+            RETURN 'histogram';  -- Explicit distribution metrics
         ELSE
-            RETURN 'gauge';
+            RETURN 'gauge';  -- Default: current state metrics
         END IF;
         
     EXCEPTION
@@ -842,6 +838,13 @@ AS
         l_span_id := get_json_value(p_json, 'span_id');
         l_attrs_json := get_json_object(p_json, 'attributes');
         
+        IF g_debug_mode THEN
+            DBMS_OUTPUT.PUT_LINE('=== METRIC NAME DEBUG ===');
+            DBMS_OUTPUT.PUT_LINE('Original name: ' || l_metric_name);
+            DBMS_OUTPUT.PUT_LINE('Unit: ' || NVL(l_unit, 'NULL'));
+            DBMS_OUTPUT.PUT_LINE('Input JSON: ' || SUBSTR(p_json, 1, 200));
+        END IF;
+
         IF l_metric_name IS NULL OR l_value IS NULL THEN
             log_error_internal('send_metric_otlp', 'Missing required metric fields (name or value)');
             RETURN;
@@ -919,6 +922,12 @@ AS
         l_metric_obj.put('description', 'PLTelemetry metric: ' || l_metric_name);
         l_metric_obj.put('unit', NVL(l_unit, '1'));
         
+        IF g_debug_mode THEN
+            DBMS_OUTPUT.PUT_LINE('=== OTLP JSON DEBUG ===');
+            DBMS_OUTPUT.PUT_LINE('Final OTLP name: ' || l_metric_obj.get_string('name'));
+            DBMS_OUTPUT.PUT_LINE('Final OTLP unit: ' || l_metric_obj.get_string('unit'));
+        END IF;
+
         l_metrics_array.append(l_metric_obj);
         
         -- Build complete structure

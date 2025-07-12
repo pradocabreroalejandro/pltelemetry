@@ -1,7 +1,8 @@
 # =============================================================================
-# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - PLAN B FIXED
+# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - FIXED PROMETHEUS LABELS
 # File: otel-collector-config.yaml
 # =============================================================================
+
 receivers:
   # HTTP receiver for PLTelemetry (Oracle PL/SQL)
   otlp:
@@ -15,6 +16,7 @@ receivers:
             - "*"
           allowed_headers:
             - "*"
+
   # Prometheus receiver for collector metrics
   prometheus:
     config:
@@ -30,11 +32,13 @@ processors:
     timeout: 1s
     send_batch_size: 1024
     send_batch_max_size: 2048
+
   # Memory limiter to prevent OOM
   memory_limiter:
     limit_mib: 512
     spike_limit_mib: 128
     check_interval: 1s
+
   # Attributes processor for PLTelemetry specific handling
   attributes:
     actions:
@@ -50,28 +54,52 @@ processors:
         value: "oracle-plsql"
         action: insert
 
+  # 🔥 NEW: Resource processor to avoid label conflicts
+  resource:
+    attributes:
+      # Remove conflicting resource attributes before prometheus export
+      - key: source
+        action: delete
+      - key: telemetry.source
+        action: delete
+      # Keep essential resource info with safe names
+      - key: otel.service.name
+        from_attribute: service.name
+        action: upsert
+      - key: otel.service.version
+        from_attribute: service.version
+        action: upsert
+
 exporters:
   # Send traces to Tempo
   otlp/tempo:
     endpoint: http://tempo:4317
     tls:
       insecure: true
+
   # Send logs to Loki
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-  # PLAN B: Classic Prometheus exporter (always works)
+
+  # 🔥 FIXED: Prometheus exporter without conflicting labels
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "pltelemetry"
-    const_labels:
-      source: "oracle"
+    # 🔥 REMOVED: const_labels that were causing conflicts
     send_timestamps: true
     metric_expiration: 180m
+    # 🔥 NEW: Avoid resource attribute conflicts
+    resource_to_telemetry_conversion:
+      enabled: false
+    # 🔥 NEW: Enable metric relabeling
+    enable_open_metrics: true
+
   # Debug output for development
   debug:
     verbosity: detailed
     sampling_initial: 5
     sampling_thereafter: 200
+
   # File export for backup/debugging
   file:
     path: /tmp/otel-output.json
@@ -81,17 +109,17 @@ service:
     # Traces pipeline
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [otlp/tempo, debug]
-    # Metrics pipeline - FIXED TO USE CLASSIC PROMETHEUS EXPORTER
+
+    # 🔥 FIXED: Metrics pipeline with resource processor
     metrics:
       receivers: [otlp, prometheus]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, resource, batch]
       exporters: [prometheus, debug]
+
     # Logs pipeline
     logs:
       receivers: [otlp]
       processors: [memory_limiter, attributes, batch]
       exporters: [loki, debug]
-
-# FIXED: Remove extensions completely or leave empty
