@@ -1,0 +1,109 @@
+.
+├── OTLP
+│   ├── Docker
+│   │   ├── docker-compose.yml
+│   │   ├── grafana
+│   │   │   ├── dashboards
+│   │   │   └── provisioning
+│   │   ├── loki.yaml
+│   │   ├── otel-collector-config.yaml
+│   │   ├── prometheus.yml
+│   │   └── tempo.yaml
+│   ├── Docker_Compose
+│   │   ├── docker-compose.yml
+│   │   └── services
+│   │       ├── batch-processor.js
+│   │       ├── document-service.js
+│   │       ├── email-service.js
+│   │       ├── oracle-reports.js
+│   │       └── weblogic-erp.js
+│   ├── examples
+│   │   ├── example_01
+│   │   │   ├── example_01_execute.sql
+│   │   │   ├── example_01.sql
+│   │   │   └── README.md
+│   │   ├── example_02
+│   │   │   ├── assets
+│   │   │   │   ├── service_monitor_01.png
+│   │   │   │   ├── service_monitor_02.png
+│   │   │   │   └── service_monitor_03.png
+│   │   │   ├── docker-compose.yml
+│   │   │   ├── Dockerfile
+│   │   │   ├── import_dashboard.sh
+│   │   │   ├── install
+│   │   │   │   ├── ACL_Access.sql
+│   │   │   │   ├── HEARTBEAT_MONITOR.PKB
+│   │   │   │   ├── HEARTBEAT_MONITOR.PKS
+│   │   │   │   ├── job.sql
+│   │   │   │   ├── PLT_HEARTBEAT_MONITOR_DATA.SQL
+│   │   │   │   └── PLT_HEARTBEAT_MONITOR_TABLES.SQL
+│   │   │   ├── package.json
+│   │   │   ├── README.md
+│   │   │   ├── services
+│   │   │   │   ├── batch-processor.js
+│   │   │   │   ├── document-service.js
+│   │   │   │   ├── email-service.js
+│   │   │   │   ├── oracle-reports.js
+│   │   │   │   └── weblogic-erp.js
+│   │   │   └── start.sh
+│   │   ├── example_03
+│   │   │   ├── assets
+│   │   │   │   ├── example_03_01.png
+│   │   │   │   ├── example_03_02.png
+│   │   │   │   ├── example_03_03.png
+│   │   │   │   └── example_03_04.png
+│   │   │   ├── install
+│   │   │   │   ├── create_job.sql
+│   │   │   │   ├── import_dashboard_lite.sh
+│   │   │   │   ├── import_dashboard.sh
+│   │   │   │   ├── pdbs_way_as_sys.sql
+│   │   │   │   ├── PLT_DB_MONITOR_DDL.sql
+│   │   │   │   ├── PLT_DB_MONITOR_DML.sql
+│   │   │   │   ├── PLT_DB_MONITOR.PKB
+│   │   │   │   ├── PLT_DB_MONITOR.PKS
+│   │   │   │   ├── Run_Grants.sql
+│   │   │   │   └── run_test.sql
+│   │   │   └── README.md
+│   │   ├── example_04
+│   │   │   ├── docker-compose-ords.yml
+│   │   │   ├── docker-compose.yml
+│   │   │   ├── FINANCIAL_API.pkb
+│   │   │   ├── FINANCIAL_API.pks
+│   │   │   ├── nodejs-service
+│   │   │   │   ├── Dockerfile
+│   │   │   │   ├── package.json
+│   │   │   │   ├── package-lock.json
+│   │   │   │   ├── server.js
+│   │   │   │   └── tracing.js
+│   │   │   ├── oracle
+│   │   │   │   └── init
+│   │   │   └── ords_financial.sql
+│   │   ├── Queries_check.sql
+│   │   └── Tables_Truncate_Script.sql
+│   ├── PLT_OTLP_BRIDGE.pkb
+│   ├── PLT_OTLP_BRIDGE.pks
+│   ├── README.md
+│   └── samples.sql
+├── postgresql
+│   ├── nodejs
+│   │   ├── package.json
+│   │   ├── README.md
+│   │   └── src
+│   │       └── PostgresBridge.js
+│   ├── oracle
+│   │   ├── examples
+│   │   │   ├── basic_integration.sql
+│   │   │   ├── job_setup.sql
+│   │   │   ├── pg_sample_data.sql
+│   │   │   └── sync_mode.sql
+│   │   └── src
+│   │       ├── install.sql
+│   │       ├── PLT_POSTGRES_BRIDGE.pkb
+│   │       └── PLT_POSTGRES_BRIDGE.pks
+│   └── schema
+│       ├── 01-database-setup.sql
+│       └── 02-postgrest-config.conf
+├── README.md
+└── tree.txt
+
+28 directories, 79 files
