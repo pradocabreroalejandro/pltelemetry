@@ -261,19 +261,22 @@ AS
     --------------------------------------------------------------------------
 
     /**
-     * Records a metric value with associated metadata
-     *
-     * @param p_metric_name The name of the metric
-     * @param p_value The numeric value of the metric
-     * @param p_unit Optional unit of measurement
-     * @param p_attributes Optional attributes for the metric
-     * @example
-     *   PLTelemetry.log_metric('order_total', 299.99, 'USD');
-     */
+    * Records a metric value with associated metadata
+    *
+    * @param p_metric_name The name of the metric
+    * @param p_value The numeric value of the metric
+    * @param p_unit Optional unit of measurement
+    * @param p_attributes Optional attributes for the metric
+    * @param p_include_trace_correlation Include trace/span IDs for correlation (default TRUE)
+    * @example
+    *   PLTelemetry.log_metric('order_total', 299.99, 'USD');
+    *   PLTelemetry.log_metric('daily_orders', 150, 'count', t_attributes(), FALSE); -- No trace correlation
+    */
     PROCEDURE log_metric (p_metric_name    VARCHAR2,
-                          p_value          NUMBER,
-                          p_unit           VARCHAR2 DEFAULT NULL,
-                          p_attributes     t_attributes DEFAULT t_attributes ());
+                        p_value          NUMBER,
+                        p_unit           VARCHAR2 DEFAULT NULL,
+                        p_attributes     t_attributes DEFAULT t_attributes(),
+                        p_include_trace_correlation BOOLEAN DEFAULT TRUE);
 
     --------------------------------------------------------------------------
     -- ATTRIBUTES AND JSON UTILITIES

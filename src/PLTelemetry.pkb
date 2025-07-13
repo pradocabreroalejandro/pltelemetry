@@ -1166,9 +1166,10 @@ AS
      * Records a metric value with associated metadata
      */
     PROCEDURE log_metric (p_metric_name    VARCHAR2,
-                         p_value          NUMBER,
-                         p_unit           VARCHAR2 DEFAULT NULL,
-                         p_attributes     t_attributes DEFAULT t_attributes())
+                     p_value          NUMBER,
+                     p_unit           VARCHAR2 DEFAULT NULL,
+                     p_attributes     t_attributes DEFAULT t_attributes(),
+                     p_include_trace_correlation BOOLEAN DEFAULT TRUE)
     IS
         l_json         VARCHAR2(32767);
         l_attrs_json   VARCHAR2(4000);
@@ -1176,6 +1177,8 @@ AS
         l_value_str    VARCHAR2(50);
         l_metric_name  VARCHAR2(255);
         l_unit         VARCHAR2(50);
+        l_trace_id     VARCHAR2(32);
+        l_span_id      VARCHAR2(16);
     BEGIN
         -- Normalize & validate input parameters
         l_metric_name := normalize_string(p_metric_name, p_max_length => 255, p_allow_null => FALSE);
@@ -1186,6 +1189,15 @@ AS
         END IF;
         
         l_unit := NVL(l_unit, 'unit');
+
+        -- Conditional trace correlation
+        IF p_include_trace_correlation THEN
+            l_trace_id := g_current_trace_id;
+            l_span_id := g_current_span_id;
+        ELSE
+            l_trace_id := NULL;
+            l_span_id := NULL;
+        END IF;
 
         -- Convert attributes to JSON
         l_attrs_json := attributes_to_json(p_attributes);
@@ -1198,14 +1210,14 @@ AS
                 l_value_str := '0';
         END;
 
-        -- Build metric JSON
+        -- Build metric JSON - conditional trace/span fields
         l_json := '{'
             || '"name":"' || REPLACE(l_metric_name, '"', '\"') || '",'
             || '"value":' || l_value_str || ','
             || '"unit":"' || REPLACE(l_unit, '"', '\"') || '",'
             || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
-            || '"trace_id":"' || NVL(g_current_trace_id, 'no-trace') || '",'
-            || '"span_id":"' || NVL(g_current_span_id, 'no-span') || '",'
+            || CASE WHEN l_trace_id IS NOT NULL THEN '"trace_id":"' || l_trace_id || '",' ELSE '' END
+            || CASE WHEN l_span_id IS NOT NULL THEN '"span_id":"' || l_span_id || '",' ELSE '' END
             || '"attributes":' || l_attrs_json
             || '}';
 
@@ -1228,8 +1240,8 @@ AS
             l_metric_name,
             p_value,
             l_unit,
-            g_current_trace_id,
-            g_current_span_id,
+            l_trace_id,  -- Can be NULL now
+            l_span_id,   -- Can be NULL now
             SYSTIMESTAMP,
             l_attrs_json
         );

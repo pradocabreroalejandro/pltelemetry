@@ -312,7 +312,7 @@ AS
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
             PLT_OTLP_BRIDGE.set_service_info('oracle-service-discovery', '1.0.0', 'production');
-            --PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
+            PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
             PLTelemetry.set_async_mode(FALSE);
 
             PLT_OTLP_BRIDGE.set_metric_type_mapping('service_response_time_%', 'gauge');
@@ -408,7 +408,8 @@ AS
             p_metric_name => 'discovery_cycle_duration',
             p_value => EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000,
             p_unit => 'ms',
-            p_attributes => l_cycle_attrs
+            p_attributes => l_cycle_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Services checked metric
@@ -416,7 +417,8 @@ AS
             p_metric_name => 'discovery_services_checked',
             p_value => l_services_checked,
             p_unit => 'count',
-            p_attributes => l_cycle_attrs
+            p_attributes => l_cycle_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Log cycle completion
@@ -628,7 +630,8 @@ AS
             p_metric_name => 'service_response_time',
             p_value => NVL(l_result.response_time_ms, -1),
             p_unit => 'ms',
-            p_attributes => l_service_attrs
+            p_attributes => l_service_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         PLTelemetry.log_metric(
@@ -639,14 +642,16 @@ AS
                         ELSE 0
                        END,
             p_unit => 'status',
-            p_attributes => l_service_attrs
+            p_attributes => l_service_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         PLTelemetry.log_metric(
             p_metric_name => 'service_check_performed',
             p_value => 1,
             p_unit => 'count',
-            p_attributes => l_service_attrs
+            p_attributes => l_service_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Success/failure counters
@@ -655,14 +660,16 @@ AS
                 p_metric_name => 'service_check_success',
                 p_value => 1,
                 p_unit => 'count',
-                p_attributes => l_service_attrs
+                p_attributes => l_service_attrs,
+                p_include_trace_correlation => FALSE
             );
         ELSE
             PLTelemetry.log_metric(
                 p_metric_name => 'service_check_failure',
                 p_value => 1,
                 p_unit => 'count',
-                p_attributes => l_service_attrs
+                p_attributes => l_service_attrs,
+                p_include_trace_correlation => FALSE
             );
         END IF;
 
@@ -714,21 +721,24 @@ AS
                     p_metric_name => 'service_response_time',
                     p_value => -1,
                     p_unit => 'milliseconds',
-                    p_attributes => l_service_attrs
+                    p_attributes => l_service_attrs,
+                    p_include_trace_correlation => FALSE
                 );
 
                 PLTelemetry.log_metric(
                     p_metric_name => 'service_status_gauge',
                     p_value => 0,
                     p_unit => 'status',
-                    p_attributes => l_service_attrs
+                    p_attributes => l_service_attrs,
+                    p_include_trace_correlation => FALSE
                 );
 
                 PLTelemetry.log_metric(
                     p_metric_name => 'service_check_failure',
                     p_value => 1,
                     p_unit => 'count',
-                    p_attributes => l_service_attrs
+                    p_attributes => l_service_attrs,
+                    p_include_trace_correlation => FALSE
                 );
             EXCEPTION
                 WHEN OTHERS THEN
@@ -807,7 +817,8 @@ AS
             p_metric_name => 'service_consecutive_failures',
             p_value => l_service.consecutive_failures,
             p_unit => 'count',
-            p_attributes => l_failure_attrs
+            p_attributes => l_failure_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Escalation level metric
@@ -815,7 +826,8 @@ AS
             p_metric_name => 'service_escalation_level',
             p_value => l_service.escalation_level,
             p_unit => 'level',
-            p_attributes => l_failure_attrs
+            p_attributes => l_failure_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Escalation change event
@@ -824,7 +836,8 @@ AS
                 p_metric_name => 'service_escalation_change',
                 p_value => 1,
                 p_unit => 'count',
-                p_attributes => l_failure_attrs
+                p_attributes => l_failure_attrs,
+                p_include_trace_correlation => FALSE
             );
             
             PLTelemetry.add_event(
@@ -940,7 +953,8 @@ AS
             p_metric_name => 'service_healthy_status',
             p_value => 1,
             p_unit => 'status',
-            p_attributes => l_recovery_attrs
+            p_attributes => l_recovery_attrs,
+            p_include_trace_correlation => FALSE
         );
 
         -- Log recovery if service was previously failing
@@ -950,7 +964,8 @@ AS
                 p_metric_name => 'service_recovery_event',
                 p_value => 1,
                 p_unit => 'count',
-                p_attributes => l_recovery_attrs
+                p_attributes => l_recovery_attrs,
+                p_include_trace_correlation => FALSE
             );
 
             -- Downtime metric if available
@@ -959,7 +974,8 @@ AS
                     p_metric_name => 'service_downtime_duration',
                     p_value => l_downtime_minutes,
                     p_unit => 'minutes',
-                    p_attributes => l_recovery_attrs
+                    p_attributes => l_recovery_attrs,
+                    p_include_trace_correlation => FALSE
                 );
             END IF;
 

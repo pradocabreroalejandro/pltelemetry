@@ -814,6 +814,7 @@ AS
         l_span_id      VARCHAR2(16);
         l_attrs_json   VARCHAR2(4000);
         l_metric_type  VARCHAR2(20);
+        l_is_business_metric BOOLEAN := FALSE;
         
         l_otlp_obj     JSON_OBJECT_T;
         l_resource_metrics JSON_ARRAY_T;
@@ -825,7 +826,7 @@ AS
         l_data_obj     JSON_OBJECT_T;
         l_data_points  JSON_ARRAY_T;
         l_point_obj    JSON_OBJECT_T;
-        l_attributes   JSON_ARRAY_T;  -- NEW: Para manejar attributes
+        l_attributes   JSON_ARRAY_T;
         
         l_final_json   CLOB;
     BEGIN
@@ -838,10 +839,16 @@ AS
         l_span_id := get_json_value(p_json, 'span_id');
         l_attrs_json := get_json_object(p_json, 'attributes');
         
+        -- Determine if this is a business metric (no trace correlation)
+        l_is_business_metric := (l_trace_id IS NULL OR l_trace_id IN ('no-trace', 'null'));
+        
         IF g_debug_mode THEN
-            DBMS_OUTPUT.PUT_LINE('=== METRIC NAME DEBUG ===');
-            DBMS_OUTPUT.PUT_LINE('Original name: ' || l_metric_name);
+            DBMS_OUTPUT.PUT_LINE('=== METRIC DEBUG ===');
+            DBMS_OUTPUT.PUT_LINE('Name: ' || l_metric_name);
+            DBMS_OUTPUT.PUT_LINE('Value: ' || l_value);
             DBMS_OUTPUT.PUT_LINE('Unit: ' || NVL(l_unit, 'NULL'));
+            DBMS_OUTPUT.PUT_LINE('Trace ID: ' || NVL(l_trace_id, 'NULL'));
+            DBMS_OUTPUT.PUT_LINE('Business metric: ' || CASE WHEN l_is_business_metric THEN 'YES' ELSE 'NO' END);
             DBMS_OUTPUT.PUT_LINE('Input JSON: ' || SUBSTR(p_json, 1, 200));
         END IF;
 
@@ -854,7 +861,7 @@ AS
         l_metric_type := get_metric_type(l_metric_name);
         
         IF g_debug_mode THEN
-            DBMS_OUTPUT.PUT_LINE('Metric: ' || l_metric_name || ' = ' || l_value || ' (' || l_metric_type || ')');
+            DBMS_OUTPUT.PUT_LINE('Metric type determined: ' || l_metric_type);
         END IF;
         
         -- Build OTLP metric structure
@@ -868,7 +875,7 @@ AS
         l_data_obj := JSON_OBJECT_T();
         l_data_points := JSON_ARRAY_T();
         l_point_obj := JSON_OBJECT_T();
-        l_attributes := JSON_ARRAY_T();  -- Initialize attributes array
+        l_attributes := JSON_ARRAY_T();
         
         -- Build data point
         l_point_obj.put('timeUnixNano', to_unix_nano(NVL(l_timestamp, TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'))));
@@ -881,23 +888,45 @@ AS
         END IF;
         
         -- ============================================================
-        -- 🎯 MAGIC HAPPENS HERE: AUTO-INJECT TENANT_ID
+        -- 🎯 ENHANCED ATTRIBUTE HANDLING FOR GRAFANA DASHBOARDS
         -- ============================================================
         
         -- Add existing attributes if present
-        IF l_attrs_json IS NOT NULL THEN
+        IF l_attrs_json IS NOT NULL AND l_attrs_json != '{}' THEN
             l_attributes := JSON_ARRAY_T.parse(convert_attributes_to_otlp(l_attrs_json));
         END IF;
         
-        -- Auto-inject tenant.id as dataPoint attribute
+        -- Auto-inject tenant.id as dataPoint attribute (ALWAYS)
         IF g_tenant_id IS NOT NULL THEN
             l_attributes.append(JSON_OBJECT_T('{"key":"tenant.id","value":{"stringValue":"' || g_tenant_id || '"}}'));
         END IF;
         
-        -- Auto-inject trace correlation if available
-        IF l_trace_id IS NOT NULL THEN
+        -- CRITICAL: Handle trace correlation vs business metrics differently
+        IF l_is_business_metric THEN
+            -- Business metrics: No trace correlation, add business flag
+            l_attributes.append(JSON_OBJECT_T('{"key":"metric.category","value":{"stringValue":"business"}}'));
+            l_attributes.append(JSON_OBJECT_T('{"key":"metric.aggregatable","value":{"stringValue":"true"}}'));
+            
+            IF g_debug_mode THEN
+                DBMS_OUTPUT.PUT_LINE('✅ BUSINESS METRIC: No trace correlation added');
+            END IF;
+        ELSE
+            -- Correlated metrics: Add trace/span correlation
             l_attributes.append(JSON_OBJECT_T('{"key":"trace.id","value":{"stringValue":"' || l_trace_id || '"}}'));
+            l_attributes.append(JSON_OBJECT_T('{"key":"metric.category","value":{"stringValue":"traced"}}'));
+            
+            -- Only add span correlation if span_id is valid
+            IF l_span_id IS NOT NULL AND l_span_id != 'no-span' THEN
+                l_attributes.append(JSON_OBJECT_T('{"key":"span.id","value":{"stringValue":"' || l_span_id || '"}}'));
+            END IF;
+            
+            IF g_debug_mode THEN
+                DBMS_OUTPUT.PUT_LINE('🔗 TRACED METRIC: Added trace correlation: ' || l_trace_id);
+            END IF;
         END IF;
+        
+        -- Add system context (useful for debugging)
+        l_attributes.append(JSON_OBJECT_T('{"key":"db.name","value":{"stringValue":"' || SYS_CONTEXT('USERENV', 'DB_NAME') || '"}}'));
         
         l_point_obj.put('attributes', l_attributes);
         
@@ -905,27 +934,32 @@ AS
         
         l_data_points.append(l_point_obj);
         
-        -- Choose appropriate OTLP metric type
+        -- Choose appropriate OTLP metric type based on Grafana best practices
         IF l_metric_type = 'counter' THEN
             l_data_obj.put('dataPoints', l_data_points);
+            l_data_obj.put('isMonotonic', TRUE);  -- Important for Grafana rate() functions
             l_metric_obj.put('sum', l_data_obj);
         ELSIF l_metric_type = 'histogram' THEN
             l_data_obj.put('dataPoints', l_data_points);
             l_metric_obj.put('histogram', l_data_obj);
         ELSE
+            -- Default: gauge (most flexible for Grafana)
             l_data_obj.put('dataPoints', l_data_points);
             l_metric_obj.put('gauge', l_data_obj);
         END IF;
         
-        -- Metric metadata
+        -- Metric metadata optimized for Grafana discovery
         l_metric_obj.put('name', l_metric_name);
-        l_metric_obj.put('description', 'PLTelemetry metric: ' || l_metric_name);
+        l_metric_obj.put('description', 'PLTelemetry metric: ' || l_metric_name || 
+                        CASE WHEN l_is_business_metric THEN ' (business)' ELSE ' (traced)' END);
         l_metric_obj.put('unit', NVL(l_unit, '1'));
         
         IF g_debug_mode THEN
-            DBMS_OUTPUT.PUT_LINE('=== OTLP JSON DEBUG ===');
-            DBMS_OUTPUT.PUT_LINE('Final OTLP name: ' || l_metric_obj.get_string('name'));
-            DBMS_OUTPUT.PUT_LINE('Final OTLP unit: ' || l_metric_obj.get_string('unit'));
+            DBMS_OUTPUT.PUT_LINE('=== FINAL OTLP METRIC ===');
+            DBMS_OUTPUT.PUT_LINE('Name: ' || l_metric_obj.get_string('name'));
+            DBMS_OUTPUT.PUT_LINE('Unit: ' || l_metric_obj.get_string('unit'));
+            DBMS_OUTPUT.PUT_LINE('Type: ' || l_metric_type);
+            DBMS_OUTPUT.PUT_LINE('Attributes count: ' || l_attributes.get_size());
         END IF;
 
         l_metrics_array.append(l_metric_obj);
@@ -946,6 +980,13 @@ AS
         
         -- Convert to CLOB and send
         l_final_json := l_otlp_obj.to_clob();
+        
+        IF g_debug_mode THEN
+            DBMS_OUTPUT.PUT_LINE('=== SENDING TO GRAFANA ===');
+            DBMS_OUTPUT.PUT_LINE('JSON size: ' || DBMS_LOB.GETLENGTH(l_final_json) || ' chars');
+            DBMS_OUTPUT.PUT_LINE('Endpoint: ' || g_metrics_endpoint);
+            DBMS_OUTPUT.PUT_LINE('Preview: ' || DBMS_LOB.SUBSTR(l_final_json, 300, 1));
+        END IF;
         
         send_to_endpoint(g_metrics_endpoint, l_final_json);
         
