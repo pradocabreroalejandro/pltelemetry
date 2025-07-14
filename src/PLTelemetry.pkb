@@ -1204,7 +1204,7 @@ AS
 
         -- Handle number formatting
         BEGIN
-            l_value_str := TO_CHAR(p_value, 'FM999999999999990.999999999', 'NLS_NUMERIC_CHARACTERS=''.,''');
+            l_value_str := NVL(RTRIM(TO_CHAR(p_value, 'FM99999999999990.999999'), '.'), '0');
         EXCEPTION
             WHEN OTHERS THEN
                 l_value_str := '0';
