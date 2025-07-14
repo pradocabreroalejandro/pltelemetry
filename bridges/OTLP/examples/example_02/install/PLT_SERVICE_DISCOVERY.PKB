@@ -313,7 +313,7 @@ AS
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
             PLT_OTLP_BRIDGE.set_service_info('oracle-service-discovery', '1.0.0', 'production');
             PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
-            PLTelemetry.set_async_mode(FALSE);
+            PLTelemetry.set_async_mode(TRUE);
 
             PLT_OTLP_BRIDGE.set_metric_type_mapping('service_response_time_%', 'gauge');
             PLT_OTLP_BRIDGE.set_metric_type_mapping('service_status_%', 'gauge');

@@ -1060,7 +1060,7 @@ AS
             || '"operation_name":"' || REPLACE(l_operation_name, '"', '\"') || '",' 
             || '"start_time":"' || TO_CHAR(l_start_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'  
             || '"end_time":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'   
-            || '"duration_ms":' || NVL(TO_CHAR(l_duration), '0') || ','
+            || '"duration_ms":' || NVL(RTRIM(TO_CHAR(l_duration, 'FM99999999999990.999999'), '.'), '0') || ','
             || '"status":"' || l_status || '",'
             || '"events":' || l_events_json || ','
             || '"attributes":' || l_attrs_json

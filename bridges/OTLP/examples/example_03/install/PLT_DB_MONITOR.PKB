@@ -404,7 +404,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_DB_MONITOR AS
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
             PLT_OTLP_BRIDGE.set_service_info('oracle-db-monitor', '1.0.0', 'production');
-            PLTelemetry.set_async_mode(FALSE);
+            PLTelemetry.set_async_mode(TRUE);
             PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
             PLT_OTLP_BRIDGE.set_timeout(5);
             
