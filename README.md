@@ -39,11 +39,11 @@ This project is provided “**as is**”, without any warranty. Use at your own 
 - 🏷️ **Enterprise-grade Tenant Context** – trace and analyze per tenant
 - 🔄 **Bridge Architecture Expanded** – simplified backend routing to OTLP/Postgres
 - 🧠 **Improved real-world examples** – built from actual usage patterns
-- 🚀 **Continuously evolving** – aggressive roadmap, early feature access
+- 🚀 **Continuously evolving** – aggressive roadmap. You will find some inconsistencies in the examples while I'm making changes. Be warned!
 
 ## What It Does
 
-PLTelemetry is not a replacement for OpenTelemetry - it's a **specialized implementation** that brings modern observability to Oracle PL/SQL environments where standard OTEL doesn't reach. Think of it as adding distributed tracing and structured logging to your stored procedures, Forms, and Reports.
+PLTelemetry is not a replacement for OpenTelemetry - it's a **specialized implementation** that brings modern observability to Oracle PL/SQL environments where standard OTEL doesn't reach. Think of it as adding distributed tracing and structured logging to your stored procedures, Forms, and Reports. I'm just trying to prevent Oracle being a black box to OTEL in a light manner
 
 **Distributed tracing across your Oracle stack:**
 ```sql
@@ -183,6 +183,10 @@ PLTelemetry generates OpenTelemetry-compatible JSON and uses "bridges" to send d
 | **OTLP** | ✅ Production | Grafana, Tempo, Jaeger, Prometheus | ✅ Tested in enterprise |
 | **PostgreSQL** | ✅ Production | Custom analysis, SQL dashboards | ✅ Tested in enterprise |
 
+You might argue why not to generate OTEL from the beggining. There are good reasons for that:
+- To avoid complex JSON, as you can rely in an external agent to do the transformation
+- To have, somehow, a frozen standar and make the changes in the briges, not in the Core and its generated data
+
 ## Quick Start with Grafana Stack (Recommended)
 
 The OTLP bridge connects PLTelemetry to Tempo, giving you distributed tracing visualization that works with your existing Grafana setup.
@@ -278,7 +282,7 @@ l_span_id := PLTelemetry.continue_distributed_trace(
 
 ### Enhanced for Oracle Ecosystem
 - **Oracle Forms Integration**: Full support for Forms-based applications
-- **Oracle Reports Support**: Trace report generation and processing
+- **Oracle Reports Support**: Trace report generation and processing, as long as you use any kind of PLSQL in the report (triggers at least)
 - **Database API Tracing**: Instrument your PL/SQL packages and procedures
 - **Multi-Tenant Support**: Trace and correlate data across different tenants
 - **Error Correlation**: Automatic linking of errors to traces for faster debugging
@@ -296,7 +300,7 @@ l_span_id := PLTelemetry.continue_distributed_trace(
 - **System Identification**: Automatic tagging of log source (Forms, PL/SQL, Reports)
 
 ### Production-Ready Features
-- **Async Processing**: Queue-based export to minimize performance impact
+- **Async Processing**: Queue-based export to minimize performance impact [I have a go agent that I will make public as soon as it is completed]
 - **Error Isolation**: Telemetry failures never break business logic
 - **Memory Efficient**: Automatic VARCHAR2/CLOB switching for large payloads
 - **Configurable Timeouts**: Prevent hanging connections
@@ -607,6 +611,9 @@ GROUP BY process_attempts;
 PLTelemetry.process_queue(100);
 ```
 
+#### Note: 
+I am currently evaluating the performance degradation by letting the queue grow. Just to get a trend, I'm aware envery setup is different
+
 #### Oracle Forms integration
 ```plsql
 -- Common mistake: forgetting to configure before first use
@@ -623,7 +630,7 @@ END;
 ## Requirements
 
 ### Database
-- Oracle Database 11g or higher (12c+ recommended for better JSON support)
+- Oracle Database 12c+
 - Required privileges: `UTL_HTTP`, `CREATE TABLE`, `CREATE PROCEDURE`
 
 ### Network
@@ -713,7 +720,6 @@ END;
 - ✅ Async and sync processing modes
 - ✅ Comprehensive error handling and isolation
 - ✅ Multi-tenant support
-- ✅ Production deployments in enterprise environments
 
 
 **Roadmap:**
@@ -721,7 +727,6 @@ END;
 - 📈 InfluxDB bridge for time-series metrics
 - 🧩 Dynamic sampling for high-throughput systems
 - 🛰️ gRPC and OTLP/HTTP v1 support
-- 🧠 AI-based anomaly detection hooks
 - 🖥️ Full Oracle APEX and REST Data Services (ORDS) integration
 
 
@@ -731,17 +736,13 @@ PLTelemetry is open source and welcomes contributions:
 
 1. **Report Issues** - Found a bug or have a feature request?
 2. **Create Bridges** - Add support for new observability backends
+3. **Create Agents** - Creating external agents to process the queue (one agent coded in golang in the making)
 3. **Improve Core** - Enhance the core PLTelemetry package
 4. **Write Examples** - Help others with real-world integration examples
 5. **Documentation** - Improve setup guides and troubleshooting
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
-## Success Stories
-
-> "PLTelemetry helped us identify a 10-second bottleneck in our Oracle Forms order processing that was hidden across 3 different systems. We reduced order processing time by 80%." - *Enterprise ERP Team*
-
-> "Distributed tracing across Forms → PL/SQL → Reports finally gave us end-to-end visibility into our customer onboarding process." - *Financial Services Company*
 
 ## License
 
@@ -892,3 +893,4 @@ BEGIN
 END;
 /
 ```
+
