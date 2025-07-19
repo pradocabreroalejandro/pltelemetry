@@ -437,6 +437,12 @@ AS
         RETURN VARCHAR2;
 
     /**
+    * Gets the current async processing mode
+    * @return VARCHAR2 - 'Y' if async mode is enabled, 'N' if disabled
+    */
+    FUNCTION get_async_mode RETURN VARCHAR2;
+
+    /**
      * Sets the API key for backend authentication
      *
      * @param p_key The API key string
@@ -527,6 +533,85 @@ AS
         p_max_length NUMBER DEFAULT 4000,
         p_allow_null BOOLEAN DEFAULT TRUE
     ) RETURN VARCHAR2;
+
+    -- ========================================================================
+    -- AGENT FAILOVER MANAGEMENT
+    -- ========================================================================
+
+    /**
+    * Checks if external agent is healthy based on heartbeat and performance
+    * @return VARCHAR2 - HEALTHY, DEGRADED, DEAD, UNKNOWN
+    */
+    FUNCTION get_agent_health RETURN VARCHAR2;
+
+    /**
+    * Evaluates if Oracle fallback should be activated
+    * @return BOOLEAN - TRUE if fallback should be active
+    */
+    FUNCTION should_activate_fallback RETURN BOOLEAN;
+
+    /**
+    * Activates Oracle-based queue processing (enables scheduler job)
+    */
+    PROCEDURE activate_oracle_fallback;
+
+    /**
+    * Deactivates Oracle-based queue processing (disables scheduler job)
+    */
+    PROCEDURE deactivate_oracle_fallback;
+
+    /**
+    * Main orchestrator - checks agent health and manages failover
+    * Should be called periodically (e.g., every minute)
+    */
+    PROCEDURE manage_queue_processor;
+
+    /**
+    * Gets current processing mode
+    * @return VARCHAR2 - AGENT_PRIMARY, ORACLE_FALLBACK
+    */
+    FUNCTION get_processing_mode RETURN VARCHAR2;
+
+    /**
+    * Process queue using Oracle (called by scheduler job)
+    * This is the actual fallback processor
+    */
+    PROCEDURE process_queue_fallback(p_batch_size NUMBER DEFAULT 100);
+
+    /**
+    * Initialize failover monitoring
+    * Creates the scheduler jobs needed for health checks
+    */
+    PROCEDURE initialize_failover_system;
+
+    /**
+    * Get failover configuration value
+    * @param p_key Configuration key
+    * @return Configuration value
+    */
+    FUNCTION get_failover_config(p_key VARCHAR2) RETURN VARCHAR2;
+
+    /**
+    * Set failover configuration value
+    * @param p_key Configuration key
+    * @param p_value Configuration value
+    */
+    PROCEDURE set_failover_config(p_key VARCHAR2, p_value VARCHAR2);
+
+
+    /**
+     * Calculate optimal batch size for processing
+     * @return Optimal batch size
+     */
+    FUNCTION calculate_optimal_batch_size RETURN NUMBER;
+
+    /**
+     * Check if the circuit breaker is open
+     * This is used to prevent overloading the system during failover
+     * @return BOOLEAN - TRUE if circuit is open, FALSE otherwise
+     */
+    FUNCTION is_circuit_open RETURN BOOLEAN;
+
 
 END PLTelemetry;
 /

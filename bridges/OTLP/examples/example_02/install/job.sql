@@ -27,14 +27,6 @@ BEGIN
             NULL; -- No legacy job to drop
     END;
     
-    -- Also drop any old queue processing job (if exists)
-    BEGIN
-        DBMS_SCHEDULER.DROP_JOB('PLT_QUEUE_PROCESSOR');
-        DBMS_OUTPUT.PUT_LINE('✅ Existing queue processor dropped');
-    EXCEPTION
-        WHEN OTHERS THEN
-            NULL; -- No queue job to drop
-    END;
 END;
 /
 
@@ -63,27 +55,7 @@ BEGIN
 END;
 /
 
--- ============================================================================
--- Create PLTelemetry queue processor job (for async mode)
--- ============================================================================
-BEGIN
-    DBMS_SCHEDULER.CREATE_JOB(
-        job_name        => 'PLT_QUEUE_PROCESSOR',
-        job_type        => 'PLSQL_BLOCK',
-        job_action      => 'BEGIN PLTelemetry.process_queue(100); END;',
-        start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=MINUTELY;INTERVAL=1', -- Every minute
-        enabled         => TRUE,
-        auto_drop       => FALSE,
-        comments        => 'PLTelemetry Queue Processor - Process async telemetry exports'
-    );
 
-    DBMS_OUTPUT.PUT_LINE('✅ PLTelemetry queue processor job created');
-    DBMS_OUTPUT.PUT_LINE('   • Processes async telemetry queue');
-    DBMS_OUTPUT.PUT_LINE('   • Runs every minute for reliable export');
-    
-END;
-/
 
 -- ============================================================================
 -- Create cleanup job for old telemetry data
@@ -150,7 +122,7 @@ SELECT
     run_count,
     failure_count
 FROM user_scheduler_jobs 
-WHERE job_name IN ('PLT_SERVICE_DISCOVERY_JOB', 'PLT_QUEUE_PROCESSOR', 'PLT_DATA_CLEANUP_JOB')
+WHERE job_name IN ('PLT_SERVICE_DISCOVERY_JOB', 'PLT_DATA_CLEANUP_JOB')
 ORDER BY job_name;
 
 -- ============================================================================

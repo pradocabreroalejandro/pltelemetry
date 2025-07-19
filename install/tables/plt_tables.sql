@@ -205,3 +205,84 @@ COMMENT ON COLUMN plt_span_attributes.span_id IS 'Reference to span (soft FK for
 COMMENT ON COLUMN plt_span_attributes.attribute_key IS 'Attribute key name';
 COMMENT ON COLUMN plt_span_attributes.attribute_value IS 'Attribute value (up to 4KB)';
 COMMENT ON COLUMN plt_span_attributes.tenant_id IS 'Tenant identifier for multi-tenancy';
+
+-- Fallbabk table for PLTelemetry logs
+-- This table is used to store fallback configurations for PLTelemetry agents
+CREATE TABLE plt_agent_registry (
+    agent_id          VARCHAR2(100) DEFAULT 'PRIMARY' PRIMARY KEY,
+    last_heartbeat    TIMESTAMP WITH TIME ZONE,
+    last_process_time TIMESTAMP WITH TIME ZONE,
+    items_processed   NUMBER DEFAULT 0,
+    items_planned     NUMBER DEFAULT 0,
+    process_interval  NUMBER DEFAULT 60, -- segundos
+    next_run_expected TIMESTAMP WITH TIME ZONE,
+    status_message    VARCHAR2(4000),
+    created_at        TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    updated_at        TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
+);
+
+-- configurations for fallback mechanism
+CREATE TABLE plt_failover_config (
+    config_key         VARCHAR2(50) PRIMARY KEY,
+    config_value       VARCHAR2(200) NOT NULL,
+    description        VARCHAR2(500),
+    updated_at         TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
+);
+
+-- default configurations for fallback mechanism
+INSERT INTO plt_failover_config (config_key, config_value, description) VALUES 
+    ('ENABLED', 'Y', 'Enable/disable fallback mechanism'),
+    ('MAX_MISSED_RUNS', '3', 'Number of missed runs before activating fallback'),
+    ('CHECK_INTERVAL', '60', 'Seconds between health checks'),
+    ('QUEUE_THRESHOLD', '1000', 'Max queue items before considering agent overloaded');
+
+INSERT INTO plt_failover_config (config_key, config_value, description)
+VALUES ('FALLBACK_BACKEND', 'OTLP_BRIDGE', 'Backend to use when in fallback mode');
+
+COMMIT;
+
+CREATE TABLE plt_fallback_metrics (
+    metric_time      TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    batch_size       NUMBER,
+    items_processed  NUMBER,
+    items_failed     NUMBER,
+    avg_latency_ms   NUMBER,
+    http_errors      NUMBER,
+    total_duration_ms NUMBER
+);
+
+-- Índice para queries eficientes
+CREATE INDEX idx_fallback_metrics_time ON plt_fallback_metrics(metric_time DESC);
+
+CREATE TABLE plt_rate_limit_config (
+    latency_threshold_ms  NUMBER NOT NULL,
+    optimal_batch_size    NUMBER NOT NULL,
+    priority              NUMBER NOT NULL,  -- Lower number = higher priority
+    description           VARCHAR2(200),
+    is_active            VARCHAR2(1) DEFAULT 'Y',
+    CONSTRAINT plt_rate_limit_pk PRIMARY KEY (priority),
+    CONSTRAINT plt_rate_limit_chk CHECK (latency_threshold_ms >= 0),
+    CONSTRAINT plt_rate_limit_size_chk CHECK (optimal_batch_size > 0)
+);
+
+-- Default configuration (adjustable per environment)
+INSERT INTO plt_rate_limit_config (priority, latency_threshold_ms, optimal_batch_size, description) VALUES
+(1, 0,    500, 'Ultra fast - aggressive processing'),
+(2, 100,  300, 'Fast - normal processing'),
+(3, 500,  150, 'Moderate - some latency detected'),
+(4, 1000, 75,  'Slow - significant latency'),
+(5, 2000, 25,  'Very slow - system struggling'),
+(6, 9999999, 10, 'Fallback - minimum processing');
+
+COMMIT;
+/
+
+-- Añadir configuración del OTLP Bridge
+INSERT INTO plt_failover_config (config_key, config_value, description) VALUES 
+    ('OTLP_COLLECTOR_URL', 'http://plt-otel-collector:4318', 'OTLP Collector endpoint for fallback'),
+    ('OTLP_SERVICE_NAME', 'oracle-plsql', 'Service name for OTLP telemetry'),
+    ('OTLP_SERVICE_VERSION', '1.0.0', 'Service version for OTLP telemetry'),
+    ('OTLP_ENVIRONMENT', 'production', 'Deployment environment');
+
+COMMIT;
+/

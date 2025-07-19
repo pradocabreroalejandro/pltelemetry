@@ -92,7 +92,6 @@ PROMPT Step 4: Installing PLTelemetry package body...
 
 PROMPT
 PROMPT Step 5: Setting up scheduler jobs...
-@@jobs/plt_queue_processor.sql
 @@jobs/plt_cleanup_job.sql
 
 PROMPT
@@ -133,7 +132,7 @@ BEGIN
     -- Check jobs
     SELECT COUNT(*) INTO l_count 
     FROM USER_SCHEDULER_JOBS 
-    WHERE JOB_NAME IN ('PLT_QUEUE_PROCESSOR', 'PLT_QUEUE_CLEANUP');
+    WHERE JOB_NAME IN ('PLT_QUEUE_CLEANUP');
     
     IF l_count != 2 THEN
         DBMS_OUTPUT.PUT_LINE('⚠ Warning: Expected 2 scheduler jobs, found ' || l_count);

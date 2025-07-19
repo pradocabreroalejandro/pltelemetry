@@ -1356,5 +1356,23 @@ AS
         RETURN g_tenant_name;
     END get_tenant_name;
 
+    FUNCTION get_traces_endpoint RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN g_traces_endpoint;
+    END get_traces_endpoint;
+
+    FUNCTION get_metrics_endpoint RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN g_metrics_endpoint;
+    END get_metrics_endpoint;
+
+    FUNCTION get_logs_endpoint RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN g_logs_endpoint;
+    END get_logs_endpoint;
+
 END PLT_OTLP_BRIDGE;
 /

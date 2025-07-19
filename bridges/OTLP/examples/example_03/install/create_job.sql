@@ -44,37 +44,6 @@ BEGIN
 END;
 /
 
--- =============================================================================
--- Also create PLTelemetry queue processor (if using async mode)
--- =============================================================================
-BEGIN
-    -- Drop existing queue processor if exists
-    BEGIN
-        DBMS_SCHEDULER.DROP_JOB('PLT_QUEUE_PROCESSOR_DEMO');
-        DBMS_OUTPUT.PUT_LINE('✅ Existing queue processor dropped');
-    EXCEPTION
-        WHEN OTHERS THEN
-            DBMS_OUTPUT.PUT_LINE('ℹ️  No existing queue processor to drop');
-    END;
-
-    -- Create aggressive queue processor for demo
-    DBMS_SCHEDULER.CREATE_JOB(
-        job_name        => 'PLT_QUEUE_PROCESSOR_DEMO',
-        job_type        => 'PLSQL_BLOCK',
-        job_action      => 'BEGIN PLTelemetry.process_queue(200); END;',
-        start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=SECONDLY;INTERVAL=15', -- Every 15 seconds
-        enabled         => TRUE,
-        auto_drop       => FALSE,
-        comments        => 'PLTelemetry Queue Processor - Demo mode with aggressive processing'
-    );
-
-    DBMS_OUTPUT.PUT_LINE('⚡ PLTelemetry queue processor created!');
-    DBMS_OUTPUT.PUT_LINE('   • Processes async queue every 15 seconds');
-    DBMS_OUTPUT.PUT_LINE('   • Processes up to 200 items per batch');
-    
-END;
-/
 
 -- =============================================================================
 -- Verify job creation and show status
@@ -94,7 +63,7 @@ SELECT
     failure_count,
     repeat_interval
 FROM user_scheduler_jobs 
-WHERE job_name IN ('PLT_DB_MONITOR_DEMO_JOB', 'PLT_QUEUE_PROCESSOR_DEMO')
+WHERE job_name IN ('PLT_DB_MONITOR_DEMO_JOB')
 ORDER BY job_name;
 
 -- =============================================================================

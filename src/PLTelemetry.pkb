@@ -333,14 +333,44 @@ AS
         l_error_msg     VARCHAR2(4000);
         l_response_body VARCHAR2(4000) := '';
         l_chunk         VARCHAR2(32767);
+        l_current_mode  VARCHAR2(50);
+        l_effective_backend VARCHAR2(500);
     BEGIN
         -- Validate input
         IF p_json IS NULL THEN
             RETURN;
         END IF;
 
+        -- Check if we're in fallback mode
+        l_current_mode := get_processing_mode();
+        
+        -- Determine which backend to use
+        IF l_current_mode = 'ORACLE_FALLBACK' THEN
+            -- Use the fallback backend (OTLP Bridge)
+            l_effective_backend := NVL(get_failover_config('FALLBACK_BACKEND'), 'OTLP_BRIDGE');
+            
+            IF l_effective_backend = 'OTLP_BRIDGE' THEN
+                -- Route through OTLP Bridge
+                BEGIN
+                    PLT_OTLP_BRIDGE.route_to_otlp(p_json);
+                    RETURN;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                        log_error_internal('send_to_backend_sync', 'OTLP bridge routing failed in fallback mode: ' || l_error_msg);
+                        RETURN;
+                END;
+            ELSE
+                -- Fallback might be configured to use a different backend
+                l_effective_backend := l_effective_backend;
+            END IF;
+        ELSE
+            -- Normal mode - use configured backend
+            l_effective_backend := g_backend_url;
+        END IF;
+
         -- ===== BRIDGE SUPPORT =====
-        IF g_backend_url = 'POSTGRES_BRIDGE' THEN
+        IF l_effective_backend = 'POSTGRES_BRIDGE' THEN
             BEGIN
                 PLT_POSTGRES_BRIDGE.send_to_backend_with_routing(p_json);
                 RETURN;
@@ -350,7 +380,7 @@ AS
                     log_error_internal('send_to_backend_sync', 'Postgres bridge routing failed: ' || l_error_msg);
                     RETURN;
             END;
-        ELSIF g_backend_url = 'OTLP_BRIDGE' THEN
+        ELSIF l_effective_backend = 'OTLP_BRIDGE' THEN
             BEGIN
                 PLT_OTLP_BRIDGE.route_to_otlp(p_json);
                 RETURN;
@@ -363,17 +393,17 @@ AS
         END IF;
         -- ===== END BRIDGE SUPPORT =====
 
-        -- Get length and validate URL
+        -- Get length and validate URL (for HTTP backends)
         l_length := LENGTH(p_json);
 
-        IF g_backend_url IS NULL OR LENGTH(g_backend_url) < 10 THEN
-            log_error_internal('send_to_backend_sync', 'Invalid backend URL configured');
+        IF l_effective_backend IS NULL OR LENGTH(l_effective_backend) < 10 THEN
+            log_error_internal('send_to_backend_sync', 'Invalid backend URL configured: ' || NVL(l_effective_backend, 'NULL'));
             RETURN;
         END IF;
 
         -- Set timeout and begin request
         UTL_HTTP.SET_TRANSFER_TIMEOUT(NVL(g_backend_timeout, 30));
-        l_req := UTL_HTTP.BEGIN_REQUEST(g_backend_url, 'POST', 'HTTP/1.1');
+        l_req := UTL_HTTP.BEGIN_REQUEST(l_effective_backend, 'POST', 'HTTP/1.1');
 
         -- Set headers
         UTL_HTTP.SET_HEADER(l_req, 'Content-Type', 'application/json; charset=utf-8');
@@ -1597,7 +1627,16 @@ AS
         RETURN g_backend_url;
     END get_backend_url;
 
-/**
+    /**
+    * Gets the current async processing mode
+    */
+    FUNCTION get_async_mode RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN CASE WHEN g_async_mode THEN 'Y' ELSE 'N' END;
+    END get_async_mode;
+
+    /**
     * Sets the API key for backend authentication
     */
    PROCEDURE set_api_key (p_key VARCHAR2)
@@ -1643,6 +1682,805 @@ AS
    BEGIN
        RETURN g_current_span_id;
    END get_current_span_id;
+
+    -- ========================================================================
+    -- AGENT FAILOVER MANAGEMENT - BODY IMPLEMENTATION
+    -- ========================================================================
+
+    /**
+    * Get agent health based on heartbeat and performance metrics
+    */
+    FUNCTION get_agent_health RETURN VARCHAR2
+    IS
+        l_last_heartbeat    TIMESTAMP WITH TIME ZONE;
+        l_process_interval  NUMBER;
+        l_missed_runs       NUMBER := 0;
+        l_max_missed        NUMBER;
+        l_items_processed   NUMBER;
+        l_items_planned     NUMBER;
+        l_performance_ratio NUMBER;
+    BEGIN
+        -- Get agent data
+        BEGIN
+            SELECT last_heartbeat, process_interval, items_processed, items_planned
+            INTO l_last_heartbeat, l_process_interval, l_items_processed, l_items_planned
+            FROM plt_agent_registry
+            WHERE agent_id = 'PRIMARY';
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                RETURN 'UNKNOWN';
+        END;
+        
+        -- Check if heartbeat is recent
+        IF l_last_heartbeat IS NULL THEN
+            RETURN 'UNKNOWN';
+        END IF;
+        
+        -- Calculate missed runs based on process interval
+        IF l_process_interval > 0 THEN
+            l_missed_runs := FLOOR(
+                EXTRACT(SECOND FROM (SYSTIMESTAMP - l_last_heartbeat)) / l_process_interval
+            );
+        END IF;
+        
+        -- Get max missed runs from config
+        l_max_missed := TO_NUMBER(NVL(get_failover_config('MAX_MISSED_RUNS'), '3'));
+        
+        -- Determine health status
+        IF l_missed_runs >= l_max_missed THEN
+            RETURN 'DEAD';
+        END IF;
+        
+        -- Check performance ratio if agent reported metrics
+        IF l_items_planned > 0 THEN
+            l_performance_ratio := l_items_processed / l_items_planned;
+            IF l_performance_ratio < 0.7 THEN  -- Less than 70% of planned
+                RETURN 'DEGRADED';
+            END IF;
+        END IF;
+        
+        RETURN 'HEALTHY';
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('get_agent_health', 
+                'Error checking agent health: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN 'UNKNOWN';
+    END get_agent_health;
+
+    /**
+    * Determine if fallback should be activated
+    */
+    FUNCTION should_activate_fallback RETURN BOOLEAN
+    IS
+        l_agent_health   VARCHAR2(20);
+        l_queue_size     NUMBER;
+        l_queue_threshold NUMBER;
+        l_enabled        VARCHAR2(1);
+    BEGIN
+        -- Check if failover is enabled
+        l_enabled := NVL(get_failover_config('ENABLED'), 'Y');
+        IF l_enabled != 'Y' THEN
+            RETURN FALSE;
+        END IF;
+        
+        -- Get agent health
+        l_agent_health := get_agent_health();
+        
+        -- Dead agent = activate fallback
+        IF l_agent_health = 'DEAD' THEN
+            RETURN TRUE;
+        END IF;
+        
+        -- Check queue size for degraded agents
+        IF l_agent_health IN ('DEGRADED', 'UNKNOWN') THEN
+            SELECT COUNT(*) 
+            INTO l_queue_size
+            FROM plt_queue
+            WHERE processed = 'N';
+            
+            l_queue_threshold := TO_NUMBER(NVL(get_failover_config('QUEUE_THRESHOLD'), '1000'));
+            
+            IF l_queue_size > l_queue_threshold THEN
+                RETURN TRUE;
+            END IF;
+        END IF;
+        
+        RETURN FALSE;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('should_activate_fallback', 
+                'Error evaluating fallback need: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN FALSE;
+    END should_activate_fallback;
+
+    /**
+    * Activate Oracle-based queue processing
+    */
+    PROCEDURE activate_oracle_fallback
+    IS
+        l_current_mode VARCHAR2(50);
+        l_fallback_backend VARCHAR2(100);
+    BEGIN
+        -- Check current mode to avoid duplicate activation
+        l_current_mode := get_processing_mode();
+        IF l_current_mode = 'ORACLE_FALLBACK' THEN
+            RETURN;  -- Already active
+        END IF;
+        
+        -- Enable the scheduler job
+        BEGIN
+            DBMS_SCHEDULER.ENABLE('PLT_QUEUE_PROCESSOR');
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Job might not exist, try to create it
+                BEGIN
+                    DBMS_SCHEDULER.CREATE_JOB(
+                        job_name        => 'PLT_QUEUE_PROCESSOR',
+                        job_type        => 'PLSQL_BLOCK',
+                        job_action      => 'BEGIN PLTelemetry.process_queue_fallback(500); END;',
+                        start_date      => SYSTIMESTAMP,
+                        repeat_interval => 'FREQ=MINUTELY;INTERVAL=1',
+                        enabled         => TRUE,
+                        comments        => 'Fallback queue processor when external agent is down'
+                    );
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        log_error_internal('activate_oracle_fallback', 
+                            'Failed to create/enable job: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+                        RAISE;
+                END;
+        END;
+        
+        -- Update processing mode in config
+        MERGE INTO plt_failover_config fc
+        USING (SELECT 'PROCESSING_MODE' as key_val FROM dual) src
+        ON (fc.config_key = src.key_val)
+        WHEN MATCHED THEN
+            UPDATE SET config_value = 'ORACLE_FALLBACK', updated_at = SYSTIMESTAMP
+        WHEN NOT MATCHED THEN
+            INSERT (config_key, config_value, description)
+            VALUES ('PROCESSING_MODE', 'ORACLE_FALLBACK', 'Current processing mode');
+        
+        -- Log which backend will be used
+        l_fallback_backend := NVL(get_failover_config('FALLBACK_BACKEND'), 'OTLP_BRIDGE');
+        
+        -- Log the transition
+        log_error_internal('activate_oracle_fallback', 
+            'Fallback activated. Agent health caused switch to Oracle processing. Using backend: ' || l_fallback_backend);
+        
+        COMMIT;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('activate_oracle_fallback', 
+                'Critical error activating fallback: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END activate_oracle_fallback;
+
+    /**
+    * Deactivate Oracle-based queue processing
+    */
+    PROCEDURE deactivate_oracle_fallback
+    IS
+        l_current_mode VARCHAR2(50);
+    BEGIN
+        -- Check current mode
+        l_current_mode := get_processing_mode();
+        IF l_current_mode != 'ORACLE_FALLBACK' THEN
+            RETURN;  -- Not active
+        END IF;
+        
+        -- Disable the scheduler job
+        BEGIN
+            DBMS_SCHEDULER.DISABLE('PLT_QUEUE_PROCESSOR', TRUE);  -- TRUE = force
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Log but don't fail
+                log_error_internal('deactivate_oracle_fallback', 
+                    'Warning: Could not disable job: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+        END;
+        
+        -- Update processing mode
+        UPDATE plt_failover_config
+        SET config_value = 'AGENT_PRIMARY', 
+            updated_at = SYSTIMESTAMP
+        WHERE config_key = 'PROCESSING_MODE';
+        
+        -- Log the transition
+        log_error_internal('deactivate_oracle_fallback', 
+            'Fallback deactivated. Agent recovered, switching back to external processing');
+        
+        COMMIT;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('deactivate_oracle_fallback', 
+                'Error deactivating fallback: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END deactivate_oracle_fallback;
+
+    /**
+    * Main orchestrator for queue processing management
+    * Auto-initializes the failover system on first run
+    */
+    PROCEDURE manage_queue_processor
+    IS
+        l_should_fallback BOOLEAN;
+        l_current_mode    VARCHAR2(50);
+        l_agent_health    VARCHAR2(20);
+        l_job_exists      NUMBER;
+        l_queue_size      NUMBER;
+        l_trace_id        VARCHAR2(32);
+        l_span_id         VARCHAR2(16);
+        l_attrs           t_attributes;
+        l_original_async  BOOLEAN;  -- Para guardar el modo original
+    BEGIN
+        -- Check if system is initialized (lazy initialization)
+        BEGIN
+            SELECT COUNT(*) INTO l_job_exists
+            FROM user_scheduler_jobs
+            WHERE job_name = 'PLT_QUEUE_PROCESSOR';
+            
+            IF l_job_exists = 0 THEN
+                -- Auto-initialize on first call
+                initialize_failover_system();
+                
+                -- Log the auto-initialization
+                log_error_internal('manage_queue_processor', 
+                    'Failover system auto-initialized on first run');
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Don't fail if we can't check, just try to proceed
+                NULL;
+        END;
+        
+        -- Get current state
+        l_current_mode := get_processing_mode();
+        l_agent_health := get_agent_health();
+        l_should_fallback := should_activate_fallback();
+        
+        -- Get queue size for context
+        SELECT COUNT(*) INTO l_queue_size
+        FROM plt_queue
+        WHERE processed = 'N';
+        
+        -- State machine logic
+        IF l_current_mode = 'AGENT_PRIMARY' AND l_should_fallback THEN
+            -- ACTIVATION: Switch to fallback
+            
+            -- Force async mode for fallback traces (they need to go to queue)
+            l_original_async := CASE WHEN get_async_mode = 'Y' THEN TRUE ELSE FALSE END;
+            set_async_mode(TRUE);
+            
+            BEGIN
+                -- Option 3: Create a trace for this state change
+                l_trace_id := start_trace('pltelemetry.fallback.activation');
+                l_span_id := start_span('activate_oracle_fallback');
+                
+                -- Add events to trace the activation process
+                add_event(l_span_id, 'agent_health_check_failed');
+                add_event(l_span_id, 'initiating_fallback_mode');
+                
+                -- Perform the activation
+                activate_oracle_fallback();
+                
+                add_event(l_span_id, 'scheduler_job_enabled');
+                add_event(l_span_id, 'fallback_mode_active');
+                
+                -- Add context attributes
+                l_attrs(1) := add_attribute('previous.mode', l_current_mode);
+                l_attrs(2) := add_attribute('new.mode', 'ORACLE_FALLBACK');
+                l_attrs(3) := add_attribute('agent.health', l_agent_health);
+                l_attrs(4) := add_attribute('queue.pending_items', TO_CHAR(l_queue_size));
+                l_attrs(5) := add_attribute('trigger.reason', 'agent_heartbeat_missing');
+                
+                end_span(l_span_id, 'OK', l_attrs);
+                end_trace(l_trace_id);
+                
+                -- Option 1: Send as structured log
+                log_message(
+                    p_level => 'WARN',
+                    p_message => 'Fallback activated - Agent appears dead, Oracle taking over queue processing',
+                    p_attributes => l_attrs
+                );
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Ensure we restore async mode even on error
+                    set_async_mode(l_original_async);
+                    RAISE;
+            END;
+            
+            -- Restore original async mode
+            set_async_mode(l_original_async);
+            
+        ELSIF l_current_mode = 'ORACLE_FALLBACK' AND NOT l_should_fallback AND l_agent_health = 'HEALTHY' THEN
+            -- RECOVERY: Agent recovered, switch back
+            
+            -- For recovery, also force async to ensure it goes through queue
+            l_original_async := CASE WHEN get_async_mode = 'Y' THEN TRUE ELSE FALSE END;
+            set_async_mode(TRUE);
+            
+            BEGIN
+                -- Option 3: Create a trace for recovery
+                l_trace_id := start_trace('pltelemetry.fallback.recovery');
+                l_span_id := start_span('deactivate_oracle_fallback');
+                
+                -- Add recovery events
+                add_event(l_span_id, 'agent_heartbeat_detected');
+                add_event(l_span_id, 'agent_health_verified');
+                add_event(l_span_id, 'initiating_recovery');
+                
+                -- Perform the deactivation
+                deactivate_oracle_fallback();
+                
+                add_event(l_span_id, 'scheduler_job_disabled');
+                add_event(l_span_id, 'control_returned_to_agent');
+                
+                -- Add context
+                l_attrs(1) := add_attribute('previous.mode', l_current_mode);
+                l_attrs(2) := add_attribute('new.mode', 'AGENT_PRIMARY');
+                l_attrs(3) := add_attribute('agent.health', l_agent_health);
+                l_attrs(4) := add_attribute('queue.pending_items', TO_CHAR(l_queue_size));
+                l_attrs(5) := add_attribute('recovery.reason', 'agent_healthy');
+                
+                end_span(l_span_id, 'OK', l_attrs);
+                end_trace(l_trace_id);
+                
+                -- Option 1: Send as structured log
+                log_message(
+                    p_level => 'INFO',
+                    p_message => 'Agent recovered - Switching back to external processing',
+                    p_attributes => l_attrs
+                );
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Ensure we restore async mode even on error
+                    set_async_mode(l_original_async);
+                    RAISE;
+            END;
+            
+            -- Restore original async mode
+            set_async_mode(l_original_async);
+        END IF;
+        
+        -- Periodic health check logging (every 10 minutes)
+        IF MOD(TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'MI')), 10) = 0 THEN
+            -- Option 1: Periodic status log
+            l_attrs.DELETE;
+            l_attrs(1) := add_attribute('current.mode', l_current_mode);
+            l_attrs(2) := add_attribute('agent.health', l_agent_health);
+            l_attrs(3) := add_attribute('queue.size', TO_CHAR(l_queue_size));
+            l_attrs(4) := add_attribute('should.fallback', CASE WHEN l_should_fallback THEN 'YES' ELSE 'NO' END);
+            
+            log_message(
+                p_level => 'DEBUG',
+                p_message => 'Fallback system health check',
+                p_attributes => l_attrs
+            );
+            
+            -- Also keep in plt_telemetry_errors for local debugging
+            log_error_internal('manage_queue_processor', 
+                'Health check - Mode: ' || l_current_mode || ', Agent: ' || l_agent_health);
+        END IF;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('manage_queue_processor', 
+                'Error in queue processor management: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+    END manage_queue_processor;
+
+
+
+    /**
+    * Get current processing mode
+    */
+    FUNCTION get_processing_mode RETURN VARCHAR2
+    IS
+        l_mode VARCHAR2(50);
+    BEGIN
+        SELECT config_value
+        INTO l_mode
+        FROM plt_failover_config
+        WHERE config_key = 'PROCESSING_MODE';
+        
+        RETURN l_mode;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN 'AGENT_PRIMARY';  -- Default mode
+        WHEN OTHERS THEN
+            RETURN 'AGENT_PRIMARY';
+    END get_processing_mode;
+
+    /**
+    * Oracle-based queue processor (fallback implementation)
+    */
+    PROCEDURE process_queue_fallback(p_batch_size NUMBER DEFAULT 100)
+    IS
+        l_processed_count NUMBER := 0;
+        l_error_count     NUMBER := 0;
+        l_queue_id        NUMBER;
+        l_payload         VARCHAR2(4000);
+        l_total_processed NUMBER := 0;
+        
+        TYPE t_queue_ids IS TABLE OF NUMBER;
+        TYPE t_payloads IS TABLE OF VARCHAR2(4000);
+        l_queue_ids t_queue_ids;
+        l_payloads  t_payloads;
+    BEGIN
+        -- AUTO-CONFIGURE OTLP BRIDGE FROM DATABASE CONFIG
+        DECLARE
+            l_collector_url VARCHAR2(500);
+            l_service_name VARCHAR2(100);
+            l_service_version VARCHAR2(50);
+            l_environment VARCHAR2(50);
+        BEGIN
+            -- Get config from database
+            SELECT MAX(CASE WHEN config_key = 'OTLP_COLLECTOR_URL' THEN config_value END),
+                MAX(CASE WHEN config_key = 'OTLP_SERVICE_NAME' THEN config_value END),
+                MAX(CASE WHEN config_key = 'OTLP_SERVICE_VERSION' THEN config_value END),
+                MAX(CASE WHEN config_key = 'OTLP_ENVIRONMENT' THEN config_value END)
+            INTO l_collector_url, l_service_name, l_service_version, l_environment
+            FROM plt_failover_config
+            WHERE config_key IN ('OTLP_COLLECTOR_URL', 'OTLP_SERVICE_NAME', 
+                                'OTLP_SERVICE_VERSION', 'OTLP_ENVIRONMENT');
+            
+            -- Configure OTLP Bridge if values found
+            IF l_collector_url IS NOT NULL THEN
+                PLT_OTLP_BRIDGE.set_otlp_collector(l_collector_url);
+                PLT_OTLP_BRIDGE.set_service_info(
+                    p_service_name => NVL(l_service_name, 'oracle-plsql'),
+                    p_service_version => NVL(l_service_version, '1.0.0'),
+                    p_deployment_environment => NVL(l_environment, 'production')
+                );
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Log but don't fail - use defaults
+                log_error_internal('process_queue_fallback', 
+                    'Failed to configure OTLP Bridge: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+        END;
+        
+        -- Fetch items to process in bulk (SOLO UNA VEZ)
+        SELECT queue_id, payload
+        BULK COLLECT INTO l_queue_ids, l_payloads
+        FROM (
+            SELECT queue_id, payload
+            FROM plt_queue
+            WHERE processed = 'N'
+            AND process_attempts < 5
+            ORDER BY queue_id
+        )
+        WHERE ROWNUM <= p_batch_size;
+        
+        -- Process each item
+        FOR i IN 1..l_queue_ids.COUNT LOOP
+            BEGIN
+                -- Update attempt count
+                UPDATE plt_queue
+                SET process_attempts = process_attempts + 1,
+                    last_attempt_time = SYSTIMESTAMP
+                WHERE queue_id = l_queue_ids(i);
+                
+                -- Send to backend
+                send_to_backend_sync(l_payloads(i));
+                
+                -- Mark as processed
+                UPDATE plt_queue
+                SET processed = 'Y',
+                    processed_time = SYSTIMESTAMP
+                WHERE queue_id = l_queue_ids(i);
+                
+                l_processed_count := l_processed_count + 1;
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    UPDATE plt_queue
+                    SET last_error = SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200)
+                    WHERE queue_id = l_queue_ids(i);
+                    
+                    l_error_count := l_error_count + 1;
+            END;
+            
+            -- Commit every 50 items
+            IF MOD(l_processed_count, 50) = 0 THEN
+                COMMIT;
+            END IF;
+        END LOOP;
+        
+        COMMIT;
+        
+        -- Log summary and send metrics
+        IF l_processed_count > 0 OR l_error_count > 0 THEN
+            -- Log locally
+            log_error_internal('process_queue_fallback', 
+                'Fallback processed: ' || l_processed_count || ' success, ' || l_error_count || ' errors');
+            
+            -- Send metrics to collector
+            PLTelemetry.log_metric(
+                p_metric_name => 'pltelemetry.fallback.items_processed',
+                p_value => l_processed_count,
+                p_unit => 'items',
+                p_include_trace_correlation => FALSE
+            );
+            
+            IF l_error_count > 0 THEN
+                PLTelemetry.log_metric(
+                    p_metric_name => 'pltelemetry.fallback.items_failed',
+                    p_value => l_error_count,
+                    p_unit => 'items',
+                    p_include_trace_correlation => FALSE
+                );
+            END IF;
+        END IF;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('process_queue_fallback', 
+                'Critical error in fallback processor: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            ROLLBACK;
+    END process_queue_fallback;
+
+    /**
+    * Initialize the failover system
+    */
+    PROCEDURE initialize_failover_system
+    IS
+    BEGIN
+        -- Create health monitor job
+        BEGIN
+            DBMS_SCHEDULER.CREATE_JOB(
+                job_name        => 'PLT_HEALTH_MONITOR',
+                job_type        => 'PLSQL_BLOCK',
+                job_action      => 'BEGIN PLTelemetry.manage_queue_processor; END;',
+                start_date      => SYSTIMESTAMP,
+                repeat_interval => 'FREQ=MINUTELY;INTERVAL=1',
+                enabled         => TRUE,
+                comments        => 'Monitor external agent health and manage failover'
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Job might already exist
+                NULL;
+        END;
+        
+        -- Create queue processor job (disabled initially)
+        BEGIN
+            DBMS_SCHEDULER.CREATE_JOB(
+                job_name        => 'PLT_QUEUE_PROCESSOR',
+                job_type        => 'PLSQL_BLOCK',
+                job_action      => 'BEGIN PLTelemetry.process_queue_fallback(500); END;',
+                start_date      => SYSTIMESTAMP,
+                repeat_interval => 'FREQ=MINUTELY;INTERVAL=1',
+                enabled         => FALSE,  -- Disabled by default
+                comments        => 'Fallback queue processor when external agent is down'
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Job might already exist
+                NULL;
+        END;
+        
+        -- Initialize default config if not exists
+        MERGE INTO plt_failover_config fc
+        USING (SELECT 'PROCESSING_MODE' as key_val FROM dual) src
+        ON (fc.config_key = src.key_val)
+        WHEN NOT MATCHED THEN
+            INSERT (config_key, config_value, description)
+            VALUES ('PROCESSING_MODE', 'AGENT_PRIMARY', 'Current processing mode');
+        
+        COMMIT;
+        
+        log_error_internal('initialize_failover_system', 'Failover system initialized successfully');
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('initialize_failover_system', 
+                'Error initializing failover system: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END initialize_failover_system;
+
+    /**
+    * Get failover configuration value
+    */
+    FUNCTION get_failover_config(p_key VARCHAR2) RETURN VARCHAR2
+    IS
+        l_value VARCHAR2(200);
+    BEGIN
+        SELECT config_value
+        INTO l_value
+        FROM plt_failover_config
+        WHERE config_key = p_key;
+        
+        RETURN l_value;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN NULL;
+        WHEN OTHERS THEN
+            RETURN NULL;
+    END get_failover_config;
+
+    /**
+    * Set failover configuration value
+    */
+    PROCEDURE set_failover_config(p_key VARCHAR2, p_value VARCHAR2)
+    IS
+    BEGIN
+        MERGE INTO plt_failover_config fc
+        USING (SELECT p_key as key_val FROM dual) src
+        ON (fc.config_key = src.key_val)
+        WHEN MATCHED THEN
+            UPDATE SET config_value = p_value, updated_at = SYSTIMESTAMP
+        WHEN NOT MATCHED THEN
+            INSERT (config_key, config_value, updated_at)
+            VALUES (p_key, p_value, SYSTIMESTAMP);
+        
+        COMMIT;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('set_failover_config', 
+                'Error setting config ' || p_key || ': ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END set_failover_config;
+
+    FUNCTION calculate_optimal_batch_size RETURN NUMBER
+    IS
+        l_avg_latency    NUMBER;
+        l_error_rate     NUMBER;
+        l_optimal_size   NUMBER;
+        l_min_batch      NUMBER;
+        l_max_batch      NUMBER;
+    BEGIN
+        -- Get metrics from last 5 minutes
+        SELECT 
+            AVG(avg_latency_ms),
+            AVG(CASE WHEN items_processed > 0 
+                THEN items_failed / items_processed 
+                ELSE 0 END)
+        INTO l_avg_latency, l_error_rate
+        FROM plt_fallback_metrics
+        WHERE metric_time > SYSTIMESTAMP - INTERVAL '5' MINUTE;
+        
+        -- Get configured limits
+        l_min_batch := TO_NUMBER(NVL(get_failover_config('MIN_BATCH_SIZE'), '10'));
+        l_max_batch := TO_NUMBER(NVL(get_failover_config('MAX_BATCH_SIZE'), '1000'));
+        
+        -- Get optimal size based on latency thresholds
+        IF l_avg_latency IS NULL THEN
+            -- No metrics yet, use conservative default
+            l_optimal_size := TO_NUMBER(NVL(get_failover_config('DEFAULT_BATCH_SIZE'), '100'));
+        ELSE
+            -- Find the appropriate batch size based on latency
+            SELECT optimal_batch_size
+            INTO l_optimal_size
+            FROM (
+                SELECT optimal_batch_size
+                FROM plt_rate_limit_config
+                WHERE is_active = 'Y'
+                AND latency_threshold_ms >= l_avg_latency
+                ORDER BY priority
+            )
+            WHERE ROWNUM = 1;
+        END IF;
+        
+        -- Apply error rate penalty
+        IF l_error_rate > 0.1 THEN -- More than 10% errors
+            l_optimal_size := l_optimal_size * 0.5;
+        ELSIF l_error_rate > 0.05 THEN -- More than 5% errors
+            l_optimal_size := l_optimal_size * 0.75;
+        END IF;
+        
+        -- Respect configured bounds
+        RETURN GREATEST(l_min_batch, LEAST(l_max_batch, l_optimal_size));
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            -- Fallback if no config found
+            RETURN NVL(TO_NUMBER(get_failover_config('DEFAULT_BATCH_SIZE')), 50);
+    END calculate_optimal_batch_size;
+
+    
+    FUNCTION is_circuit_open RETURN BOOLEAN
+    IS
+        l_recent_errors     NUMBER;
+        l_total_attempts    NUMBER;
+        l_error_rate        NUMBER;
+        l_circuit_state     VARCHAR2(20);
+        l_last_state_change TIMESTAMP WITH TIME ZONE;
+        l_threshold         NUMBER;
+        l_recovery_time     NUMBER;
+    BEGIN
+        -- Get current circuit state
+        l_circuit_state := NVL(get_failover_config('CIRCUIT_STATE'), 'CLOSED');
+        
+        -- Get circuit breaker thresholds from config
+        l_threshold := TO_NUMBER(NVL(get_failover_config('CIRCUIT_ERROR_THRESHOLD'), '0.5')); -- 50% default
+        l_recovery_time := TO_NUMBER(NVL(get_failover_config('CIRCUIT_RECOVERY_MINUTES'), '5')); -- 5 min default
+        
+        -- Check recent error rate (configurable window)
+        SELECT 
+            SUM(http_errors),
+            SUM(items_processed + items_failed)
+        INTO l_recent_errors, l_total_attempts
+        FROM plt_fallback_metrics
+        WHERE metric_time > SYSTIMESTAMP - INTERVAL '2' MINUTE;
+        
+        -- Calculate error rate
+        IF l_total_attempts > 0 THEN
+            l_error_rate := l_recent_errors / l_total_attempts;
+        ELSE
+            l_error_rate := 0;
+        END IF;
+        
+        -- Circuit breaker state machine
+        CASE l_circuit_state
+            WHEN 'OPEN' THEN
+                -- Check if enough time has passed to try recovery
+                BEGIN
+                    SELECT TO_TIMESTAMP_TZ(config_value, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM')
+                    INTO l_last_state_change
+                    FROM plt_failover_config
+                    WHERE config_key = 'CIRCUIT_OPEN_TIME';
+                    
+                    IF l_last_state_change < SYSTIMESTAMP - (l_recovery_time / 1440) THEN  -- 1440 minutos en un día
+                        -- Try half-open state
+                        set_failover_config('CIRCUIT_STATE', 'HALF_OPEN');
+                        log_error_internal('is_circuit_open', 'Circuit breaker: OPEN -> HALF_OPEN');
+                        RETURN FALSE; -- Allow limited traffic
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        -- If no timestamp, close the circuit
+                        set_failover_config('CIRCUIT_STATE', 'CLOSED');
+                        RETURN FALSE;
+                END;
+                RETURN TRUE; -- Still open
+                
+            WHEN 'HALF_OPEN' THEN
+                -- In half-open state, check if we should fully open or close
+                IF l_total_attempts >= 10 THEN -- Need some attempts to decide
+                    IF l_error_rate > l_threshold * 0.5 THEN -- Still failing (use lower threshold)
+                        -- Back to open
+                        set_failover_config('CIRCUIT_STATE', 'OPEN');
+                        set_failover_config('CIRCUIT_OPEN_TIME', TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'));
+                        log_error_internal('is_circuit_open', 'Circuit breaker: HALF_OPEN -> OPEN (error rate: ' || ROUND(l_error_rate * 100, 1) || '%)');
+                        RETURN TRUE;
+                    ELSE
+                        -- Recovery successful, close circuit
+                        set_failover_config('CIRCUIT_STATE', 'CLOSED');
+                        log_error_internal('is_circuit_open', 'Circuit breaker: HALF_OPEN -> CLOSED (recovered)');
+                        RETURN FALSE;
+                    END IF;
+                END IF;
+                RETURN FALSE; -- Continue in half-open
+                
+            ELSE -- CLOSED
+                -- Check if we should open the circuit
+                IF l_total_attempts > TO_NUMBER(NVL(get_failover_config('CIRCUIT_MIN_ATTEMPTS'), '50')) 
+                AND l_error_rate > l_threshold THEN
+                    -- Open the circuit
+                    set_failover_config('CIRCUIT_STATE', 'OPEN');
+                    set_failover_config('CIRCUIT_OPEN_TIME', TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS.FF TZH:TZM'));
+                    log_error_internal('is_circuit_open', 'Circuit breaker: CLOSED -> OPEN (error rate: ' || ROUND(l_error_rate * 100, 1) || '%)');
+                    RETURN TRUE;
+                END IF;
+                RETURN FALSE; -- Circuit remains closed
+        END CASE;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- On any error, default to closed (allow traffic)
+            log_error_internal('is_circuit_open', 
+                'Circuit breaker check failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN FALSE;
+    END is_circuit_open;
 
 END PLTelemetry;
 /

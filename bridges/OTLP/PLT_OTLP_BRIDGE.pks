@@ -299,5 +299,10 @@ AS
      */
     FUNCTION validate_collector_connectivity RETURN BOOLEAN;
 
+    -- Añadir al PLT_OTLP_BRIDGE package specification
+    FUNCTION get_traces_endpoint RETURN VARCHAR2;
+    FUNCTION get_metrics_endpoint RETURN VARCHAR2;
+    FUNCTION get_logs_endpoint RETURN VARCHAR2;
+
 END PLT_OTLP_BRIDGE;
 /
