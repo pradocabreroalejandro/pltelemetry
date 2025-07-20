@@ -2121,7 +2121,7 @@ AS
             l_environment VARCHAR2(50);
         BEGIN
             -- Get config from database
-            SELECT MAX(CASE WHEN config_key = 'OTLP_COLLECTOR_URL' THEN config_value END),
+            SELECT MAX(CASE WHEN config_key = '`OTLP_COLLECTOR_URL' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_SERVICE_NAME' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_SERVICE_VERSION' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_ENVIRONMENT' THEN config_value END)
