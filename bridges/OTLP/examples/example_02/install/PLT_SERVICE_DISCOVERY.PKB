@@ -312,7 +312,7 @@ AS
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
             PLT_OTLP_BRIDGE.set_service_info('oracle-service-discovery', '1.0.0', 'production');
-            PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
+            --PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
             PLTelemetry.set_async_mode(TRUE);
 
             PLT_OTLP_BRIDGE.set_metric_type_mapping('service_response_time_%', 'gauge');
@@ -492,7 +492,85 @@ AS
         -- Load service configuration
         l_service := load_service_runtime(l_service_name);
 
-        -- Initialize result
+        -- >>> FIXED: Route based on service type with proper RETURN <
+        DECLARE
+            l_service_type VARCHAR2(50);
+        BEGIN
+            -- Get service type from database
+            SELECT service_type 
+            INTO l_service_type
+            FROM plt_service_discovery_config 
+            WHERE service_name = l_service_name;
+            
+            -- Route to appropriate execution path
+            IF l_service_type = 'CUSTOM' THEN
+                -- Execute custom plan
+                DECLARE
+                    l_custom_plan_json VARCHAR2(4000);
+                    l_skip_result t_health_result;
+                BEGIN
+                    SELECT custom_plan_json 
+                    INTO l_custom_plan_json
+                    FROM plt_service_discovery_config 
+                    WHERE service_name = l_service_name;
+                    
+                    IF l_custom_plan_json IS NULL THEN
+                        -- Skip check and return early with error state
+                        l_skip_result.service_name := l_service_name;
+                        l_skip_result.status := C_ERROR;
+                        l_skip_result.check_timestamp := SYSTIMESTAMP;
+                        l_skip_result.error_message := 'Custom plan JSON not ready - DataPerro processing pending';
+                        l_skip_result.response_time_ms := 0;
+                        l_skip_result.tenant_id := l_service.tenant_id;
+                        
+                        -- Log error for service discovery tracking
+                        log_error_internal(
+                            'check_service_health', 
+                            'CUSTOM service ' || l_service_name || ' has no JSON plan ready. DataPerro may still be processing YAML.',
+                            l_trace_id, 
+                            l_span_id
+                        );
+                        
+                        -- Log distributed error for observability
+                        PLTelemetry.log_distributed(
+                            p_trace_id => l_trace_id,
+                            p_level => 'WARN',
+                            p_message => 'CUSTOM service ' || l_service_name || ' skipped - JSON plan not ready',
+                            p_system => 'PLT_SERVICE_DISCOVERY',
+                            p_tenant_id => l_service.tenant_id
+                        );
+                        
+                        -- Add telemetry event for debugging
+                        l_attrs := PLTelemetry.t_attributes();
+                        l_attrs(1) := PLTelemetry.add_attribute('service.name', l_service_name);
+                        l_attrs(2) := PLTelemetry.add_attribute('service.type', 'CUSTOM');
+                        l_attrs(3) := PLTelemetry.add_attribute('skip.reason', 'json_plan_not_ready');
+                        PLTelemetry.add_event(l_span_id, 'custom_service_check_skipped', l_attrs);
+                        
+                        -- End span and trace
+                        PLTelemetry.end_span(l_span_id, 'ERROR');
+                        IF l_normalized_trace_id IS NULL THEN
+                            PLTelemetry.end_trace(l_trace_id);
+                        END IF;
+                        
+                        RETURN l_skip_result;
+                    ELSE
+                        -- 🔥 CRITICAL FIX: Execute custom plan and RETURN immediately
+                        RETURN execute_custom_plan(l_service_name, l_custom_plan_json, l_normalized_trace_id);
+                    END IF;
+                    
+                END;
+            END IF;
+            
+            -- If not CUSTOM, continue with existing ENDPOINT logic below...
+            
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                -- Service not found - this will be handled by existing code
+                NULL;
+        END;
+
+        -- Initialize result (ONLY reached for non-CUSTOM services)
         l_result.service_name := l_service_name;
         l_result.check_timestamp := SYSTIMESTAMP;
         l_result.tenant_id := l_service.tenant_id;
@@ -640,7 +718,7 @@ AS
                         WHEN C_HEALTHY THEN 1
                         WHEN C_DEGRADED THEN 0.5
                         ELSE 0
-                       END,
+                    END,
             p_unit => 'status',
             p_attributes => l_service_attrs,
             p_include_trace_correlation => FALSE
@@ -1567,6 +1645,484 @@ AS
     BEGIN
         RETURN g_current_tenant_id;
     END get_current_tenant_id;
+
+
+    /**
+    * Substitute template variables in a string
+    */
+    FUNCTION substitute_template_variables(
+        p_template IN VARCHAR2,
+        p_context IN t_execution_context
+    ) RETURN VARCHAR2
+    IS
+        l_result VARCHAR2(4000);
+        l_template VARCHAR2(4000);
+    BEGIN
+        -- Normalize input
+        l_template := normalize_string(p_template, p_max_length => 4000, p_allow_null => TRUE);
+        
+        IF l_template IS NULL THEN
+            RETURN NULL;
+        END IF;
+        
+        l_result := l_template;
+        
+        -- Replace known template variables
+        l_result := REPLACE(l_result, '{{http_status}}', TO_CHAR(NVL(p_context.http_status, 0)));
+        l_result := REPLACE(l_result, '{{http_response_time}}', TO_CHAR(NVL(p_context.http_response_time, 0)));
+        l_result := REPLACE(l_result, '{{service_name}}', NVL(p_context.service_name, 'unknown'));
+        l_result := REPLACE(l_result, '{{tenant_id}}', NVL(p_context.tenant_id, 'default'));
+        
+        -- Add more variables as needed in the future
+        -- l_result := REPLACE(l_result, '{{custom_var}}', p_context.custom_var);
+        
+        RETURN l_result;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('substitute_template_variables', 
+                            'Template substitution failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN l_template; -- Return original on error
+    END substitute_template_variables;
+
+    /**
+    * Execute HTTP call action from custom plan
+    */
+    FUNCTION execute_http_call_action(
+        p_action_json IN VARCHAR2,
+        p_context IN OUT t_execution_context,
+        p_span_id IN VARCHAR2
+    ) RETURN t_execution_context
+    IS
+        l_url VARCHAR2(300);
+        l_timeout NUMBER;
+        l_req UTL_HTTP.REQ;
+        l_resp UTL_HTTP.RESP;
+        l_response_body VARCHAR2(4000);
+        l_buffer VARCHAR2(32767);
+        l_start_time TIMESTAMP := SYSTIMESTAMP;
+        l_attrs PLTelemetry.t_attributes;
+        l_action_json VARCHAR2(4000);
+        l_error_msg VARCHAR2(4000);
+    BEGIN
+        -- Normalize input
+        l_action_json := normalize_string(p_action_json, p_max_length => 4000, p_allow_null => FALSE);
+        
+        IF l_action_json IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20200, 'HTTP call action JSON cannot be null');
+        END IF;
+        
+        -- Parse HTTP call configuration
+        BEGIN
+            l_url := JSON_VALUE(l_action_json, '$.http_call.url');
+            l_timeout := NVL(JSON_VALUE(l_action_json, '$.http_call.timeout'), 10);
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(-20201, 'Invalid http_call JSON configuration');
+        END;
+        
+        -- Validate required fields
+        IF l_url IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20202, 'http_call.url is required');
+        END IF;
+        
+        -- Substitute template variables in URL
+        l_url := substitute_template_variables(l_url, p_context);
+        
+        -- Add telemetry event
+        l_attrs(1) := PLTelemetry.add_attribute('action.type', 'http_call');
+        l_attrs(2) := PLTelemetry.add_attribute('http.url', l_url);
+        l_attrs(3) := PLTelemetry.add_attribute('http.timeout', TO_CHAR(l_timeout));
+        PLTelemetry.add_event(p_span_id, 'custom_plan_http_call_start', l_attrs);
+        
+        BEGIN
+            -- Set timeout
+            UTL_HTTP.SET_TRANSFER_TIMEOUT(l_timeout);
+            
+            -- Make HTTP request
+            l_req := UTL_HTTP.BEGIN_REQUEST(l_url, 'GET', 'HTTP/1.1');
+            UTL_HTTP.SET_HEADER(l_req, 'User-Agent', 'PLTelemetry-CustomPlan/1.0');
+            UTL_HTTP.SET_HEADER(l_req, 'Accept', 'application/json');
+            UTL_HTTP.SET_HEADER(l_req, 'X-Monitor-Source', 'Oracle-PLTelemetry-Custom');
+            UTL_HTTP.SET_HEADER(l_req, 'X-Service-Name', p_context.service_name);
+            
+            l_resp := UTL_HTTP.GET_RESPONSE(l_req);
+            p_context.http_status := l_resp.status_code;
+            
+            -- Read response body
+            BEGIN
+                UTL_HTTP.READ_TEXT(l_resp, l_buffer, 4000);
+                l_response_body := l_buffer;
+            EXCEPTION
+                WHEN UTL_HTTP.END_OF_BODY THEN
+                    NULL; -- Normal end of response
+            END;
+            p_context.http_response_body := l_response_body;
+            
+            UTL_HTTP.END_RESPONSE(l_resp);
+            
+            -- Calculate response time
+            p_context.http_response_time := EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000;
+            
+            -- Add success telemetry
+            l_attrs := PLTelemetry.t_attributes();
+            l_attrs(1) := PLTelemetry.add_attribute('action.type', 'http_call');
+            l_attrs(2) := PLTelemetry.add_attribute('http.status_code', TO_CHAR(p_context.http_status));
+            l_attrs(3) := PLTelemetry.add_attribute('http.response_time_ms', TO_CHAR(p_context.http_response_time));
+            PLTelemetry.add_event(p_span_id, 'custom_plan_http_call_success', l_attrs);
+            
+        EXCEPTION
+            WHEN UTL_HTTP.TRANSFER_TIMEOUT THEN
+                p_context.http_status := -1;
+                p_context.http_response_time := -1;
+                p_context.http_response_body := 'TIMEOUT';
+                
+                PLTelemetry.add_event(p_span_id, 'custom_plan_http_call_timeout');
+                
+            WHEN UTL_HTTP.REQUEST_FAILED THEN
+                p_context.http_status := -2;
+                p_context.http_response_time := -1;
+                p_context.http_response_body := 'CONNECTION_FAILED';
+                
+                PLTelemetry.add_event(p_span_id, 'custom_plan_http_call_failed');
+                
+            WHEN OTHERS THEN
+                l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
+                p_context.http_status := -3;
+                p_context.http_response_time := -1;
+                p_context.http_response_body := 'ERROR: ' || l_error_msg;
+                
+                l_attrs := PLTelemetry.t_attributes();
+                l_attrs(1) := PLTelemetry.add_attribute('action.type', 'http_call');
+                l_attrs(2) := PLTelemetry.add_attribute('error.message', l_error_msg);
+                PLTelemetry.add_event(p_span_id, 'custom_plan_http_call_error', l_attrs);
+        END;
+        
+        RETURN p_context;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            log_error_internal('execute_http_call_action', l_error_msg);
+            
+            -- Set error context
+            p_context.http_status := -4;
+            p_context.http_response_time := -1;
+            p_context.http_response_body := 'CRITICAL_ERROR';
+            
+            RETURN p_context;
+    END execute_http_call_action;
+
+    /**
+    * Execute send_metric action from custom plan
+    */
+    PROCEDURE execute_send_metric_action(
+        p_action_json IN VARCHAR2,
+        p_context IN t_execution_context,
+        p_span_id IN VARCHAR2
+    )
+    IS
+        l_metric_name VARCHAR2(255);
+        l_metric_value VARCHAR2(100);
+        l_metric_unit VARCHAR2(50);
+        l_labels_json VARCHAR2(4000);
+        l_labels_obj JSON_OBJECT_T;
+        l_keys JSON_KEY_LIST;
+        l_attrs PLTelemetry.t_attributes;
+        l_idx NUMBER := 1;
+        l_key VARCHAR2(255);
+        l_value VARCHAR2(4000);
+        l_final_value NUMBER;
+        l_action_json VARCHAR2(4000);
+        l_error_msg VARCHAR2(4000);
+    BEGIN
+        -- Normalize input
+        l_action_json := normalize_string(p_action_json, p_max_length => 4000, p_allow_null => FALSE);
+        
+        IF l_action_json IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20203, 'Send metric action JSON cannot be null');
+        END IF;
+        
+        -- Parse send_metric configuration
+        BEGIN
+            l_metric_name := JSON_VALUE(l_action_json, '$.send_metric.name');
+            l_metric_value := JSON_VALUE(l_action_json, '$.send_metric.value');
+            l_metric_unit := NVL(JSON_VALUE(l_action_json, '$.send_metric.unit'), 'unit');
+            l_labels_json := JSON_QUERY(l_action_json, '$.send_metric.labels');
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(-20204, 'Invalid send_metric JSON configuration');
+        END;
+        
+        -- Validate required fields
+        IF l_metric_name IS NULL OR l_metric_value IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20205, 'send_metric.name and send_metric.value are required');
+        END IF;
+        
+        -- Substitute template variables
+        l_metric_name := substitute_template_variables(l_metric_name, p_context);
+        l_metric_value := substitute_template_variables(l_metric_value, p_context);
+        l_metric_unit := substitute_template_variables(l_metric_unit, p_context);
+        
+        -- Convert metric value to number
+        BEGIN
+            l_final_value := TO_NUMBER(l_metric_value);
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- If conversion fails, use a sentinel value
+                l_final_value := CASE 
+                    WHEN UPPER(l_metric_value) = 'TRUE' THEN 1
+                    WHEN UPPER(l_metric_value) = 'FALSE' THEN 0
+                    ELSE -1
+                END;
+        END;
+        
+        -- Process labels if present
+        IF l_labels_json IS NOT NULL AND l_labels_json != '{}' THEN
+            l_labels_obj := JSON_OBJECT_T.parse(l_labels_json);
+            l_keys := l_labels_obj.get_keys();
+            
+            FOR i IN 1 .. l_keys.COUNT LOOP
+                l_key := l_keys(i);
+                l_value := l_labels_obj.get_string(l_key);
+                
+                -- Substitute template variables in label values
+                l_value := substitute_template_variables(l_value, p_context);
+                
+                l_attrs(l_idx) := PLTelemetry.add_attribute(l_key, l_value);
+                l_idx := l_idx + 1;
+            END LOOP;
+        END IF;
+        
+        -- Add action context
+        l_attrs(l_idx) := PLTelemetry.add_attribute('action.type', 'send_metric');
+        l_idx := l_idx + 1;
+        l_attrs(l_idx) := PLTelemetry.add_attribute('metric.source', 'custom_plan');
+        
+        -- Send the metric using PLTelemetry
+        PLTelemetry.log_metric(
+            p_metric_name => l_metric_name,
+            p_value => l_final_value,
+            p_unit => l_metric_unit,
+            p_attributes => l_attrs,
+            p_include_trace_correlation => FALSE  -- Stable labels for Grafana
+        );
+        
+        -- Add telemetry event
+        l_attrs := PLTelemetry.t_attributes();
+        l_attrs(1) := PLTelemetry.add_attribute('action.type', 'send_metric');
+        l_attrs(2) := PLTelemetry.add_attribute('metric.name', l_metric_name);
+        l_attrs(3) := PLTelemetry.add_attribute('metric.value', TO_CHAR(l_final_value));
+        l_attrs(4) := PLTelemetry.add_attribute('metric.unit', l_metric_unit);
+        PLTelemetry.add_event(p_span_id, 'custom_plan_metric_sent', l_attrs);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            log_error_internal('execute_send_metric_action', l_error_msg);
+            
+            l_attrs := PLTelemetry.t_attributes();
+            l_attrs(1) := PLTelemetry.add_attribute('action.type', 'send_metric');
+            l_attrs(2) := PLTelemetry.add_attribute('error.message', SUBSTR(l_error_msg, 1, 200));
+            PLTelemetry.add_event(p_span_id, 'custom_plan_metric_error', l_attrs);
+    END execute_send_metric_action;
+
+    /**
+    * Execute a custom monitoring plan from JSON configuration
+    */
+    FUNCTION execute_custom_plan(
+        p_service_name IN VARCHAR2,
+        p_custom_plan_json IN VARCHAR2,
+        p_trace_id IN VARCHAR2 DEFAULT NULL
+    ) RETURN t_health_result
+    IS
+        l_result t_health_result;
+        l_context t_execution_context;
+        l_plan_json VARCHAR2(4000);
+        l_actions_array JSON_ARRAY_T;
+        l_action_obj JSON_OBJECT_T;
+        l_action_json VARCHAR2(4000);
+        l_span_id VARCHAR2(16);
+        l_trace_id VARCHAR2(32);
+        l_attrs PLTelemetry.t_attributes;
+        l_service_name VARCHAR2(50);
+        l_plan_name VARCHAR2(100);
+        l_plan_description VARCHAR2(500);
+        l_action_count NUMBER := 0;
+        l_error_msg VARCHAR2(4000);
+        l_start_time TIMESTAMP := SYSTIMESTAMP;
+    BEGIN
+        -- Normalize & validate input parameters
+        l_service_name := normalize_string(p_service_name, p_max_length => 50, p_allow_null => FALSE);
+        l_plan_json := normalize_string(p_custom_plan_json, p_max_length => 4000, p_allow_null => FALSE);
+        
+        IF l_service_name IS NULL OR l_plan_json IS NULL THEN
+            RAISE_APPLICATION_ERROR(-20206, 'Service name and custom plan JSON are required');
+        END IF;
+        
+        -- Initialize result
+        l_result.service_name := l_service_name;
+        l_result.check_timestamp := SYSTIMESTAMP;
+        l_result.status := C_HEALTHY; -- Assume success until proven otherwise
+        
+        -- Initialize execution context
+        l_context.service_name := l_service_name;
+        
+        -- CRITICAL FIX: Get tenant_id from service config for OTLP bridge
+        BEGIN
+            SELECT tenant_id INTO l_context.tenant_id
+            FROM plt_service_discovery_config 
+            WHERE service_name = l_service_name;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                l_context.tenant_id := NULL;
+        END;
+        
+        -- Start or continue distributed trace
+        IF p_trace_id IS NOT NULL THEN
+            l_trace_id := p_trace_id;
+            l_span_id := PLTelemetry.continue_distributed_trace(
+                p_trace_id => p_trace_id,
+                p_operation => 'custom_plan_execution_' || l_service_name
+            );
+        ELSE
+            l_trace_id := PLTelemetry.start_trace('custom_plan_' || l_service_name);
+            l_span_id := PLTelemetry.start_span('custom_plan_execution');
+        END IF;
+        
+        -- Parse plan metadata
+        BEGIN
+            l_plan_name := JSON_VALUE(l_plan_json, '$.name');
+            l_plan_description := JSON_VALUE(l_plan_json, '$.description');
+            l_actions_array := JSON_ARRAY_T.parse(JSON_QUERY(l_plan_json, '$.actions'));
+        EXCEPTION
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(-20207, 'Invalid custom plan JSON structure');
+        END;
+        
+        -- Add plan context to telemetry
+        l_attrs(1) := PLTelemetry.add_attribute('plan.name', NVL(l_plan_name, 'unnamed'));
+        l_attrs(2) := PLTelemetry.add_attribute('plan.description', NVL(l_plan_description, 'no description'));
+        l_attrs(3) := PLTelemetry.add_attribute('plan.action_count', TO_CHAR(l_actions_array.get_size()));
+        l_attrs(4) := PLTelemetry.add_attribute('service.name', l_service_name);
+        l_attrs(5) := PLTelemetry.add_attribute('execution.type', 'custom_plan');
+        PLTelemetry.add_event(l_span_id, 'custom_plan_execution_started', l_attrs);
+        
+        -- Execute actions sequentially
+        FOR i IN 0 .. l_actions_array.get_size() - 1 LOOP
+            l_action_count := l_action_count + 1;
+            l_action_obj := JSON_OBJECT_T(l_actions_array.get(i));
+            l_action_json := l_action_obj.to_string();
+            
+            -- Determine action type and execute
+            IF JSON_EXISTS(l_action_json, '$.http_call') THEN
+                l_context := execute_http_call_action(l_action_json, l_context, l_span_id);
+                
+            ELSIF JSON_EXISTS(l_action_json, '$.send_metric') THEN
+                execute_send_metric_action(l_action_json, l_context, l_span_id);
+                
+            ELSE
+                -- Unknown action type - log but continue
+                l_attrs := PLTelemetry.t_attributes();
+                l_attrs(1) := PLTelemetry.add_attribute('action.index', TO_CHAR(i));
+                l_attrs(2) := PLTelemetry.add_attribute('action.json', SUBSTR(l_action_json, 1, 200));
+                PLTelemetry.add_event(l_span_id, 'custom_plan_unknown_action', l_attrs);
+            END IF;
+        END LOOP;
+        
+        -- Determine final result based on HTTP calls
+        IF l_context.http_status > 0 THEN
+            l_result.status_code := l_context.http_status;
+            l_result.response_time_ms := l_context.http_response_time;
+            l_result.response_body := l_context.http_response_body;
+            
+            -- Determine health status based on HTTP status
+            IF l_context.http_status = 200 THEN
+                l_result.status := C_HEALTHY;
+            ELSIF l_context.http_status BETWEEN 201 AND 299 THEN
+                l_result.status := C_HEALTHY;
+            ELSIF l_context.http_status BETWEEN 400 AND 499 THEN
+                l_result.status := C_DEGRADED;
+                l_result.error_message := 'HTTP client error: ' || l_context.http_status;
+            ELSIF l_context.http_status BETWEEN 500 AND 599 THEN
+                l_result.status := C_UNHEALTHY;
+                l_result.error_message := 'HTTP server error: ' || l_context.http_status;
+            ELSE
+                l_result.status := C_ERROR;
+                l_result.error_message := 'Unexpected HTTP status: ' || l_context.http_status;
+            END IF;
+        ELSIF l_context.http_status = -1 THEN
+            l_result.status := C_TIMEOUT;
+            l_result.error_message := 'Request timeout';
+            l_result.response_time_ms := -1;
+        ELSIF l_context.http_status = -2 THEN
+            l_result.status := C_DOWN;
+            l_result.error_message := 'Connection failed';
+            l_result.response_time_ms := -1;
+        ELSE
+            l_result.status := C_ERROR;
+            l_result.error_message := 'Custom plan execution error';
+            l_result.response_time_ms := -1;
+        END IF;
+        
+        -- Calculate total execution time if not set by HTTP call
+        IF l_result.response_time_ms IS NULL THEN
+            l_result.response_time_ms := EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000;
+        END IF;
+        
+        -- Add final result to telemetry
+        l_attrs := PLTelemetry.t_attributes();
+        l_attrs(1) := PLTelemetry.add_attribute('plan.actions_executed', TO_CHAR(l_action_count));
+        l_attrs(2) := PLTelemetry.add_attribute('result.status', l_result.status);
+        l_attrs(3) := PLTelemetry.add_attribute('result.http_status', TO_CHAR(NVL(l_result.status_code, 0)));
+        l_attrs(4) := PLTelemetry.add_attribute('result.response_time_ms', TO_CHAR(NVL(l_result.response_time_ms, 0)));
+        PLTelemetry.add_event(l_span_id, 'custom_plan_execution_completed', l_attrs);
+        
+        -- End span based on result
+        IF l_result.status IN (C_HEALTHY, C_DEGRADED) THEN
+            PLTelemetry.end_span(l_span_id, 'OK');
+        ELSE
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+        END IF;
+        
+        -- End trace if we started it
+        IF p_trace_id IS NULL THEN
+            PLTelemetry.end_trace(l_trace_id);
+        END IF;
+        
+        RETURN l_result;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            
+            l_result.status := C_ERROR;
+            l_result.error_message := 'Custom plan execution failed: ' || SUBSTR(l_error_msg, 1, 500);
+            l_result.response_time_ms := -1;
+            
+            -- Log error
+            log_error_internal('execute_custom_plan', l_error_msg, l_trace_id, l_span_id);
+            
+            l_attrs := PLTelemetry.t_attributes();
+            l_attrs(1) := PLTelemetry.add_attribute('error.message', SUBSTR(l_error_msg, 1, 200));
+            l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
+            
+            PLTelemetry.log_distributed(
+                p_trace_id => l_trace_id,
+                p_level => 'ERROR',
+                p_message => 'Custom plan execution critical failure for ' || l_service_name || ': ' || SUBSTR(l_error_msg, 1, 200),
+                p_system => 'PLT_SERVICE_DISCOVERY'
+            );
+            
+            PLTelemetry.end_span(l_span_id, 'ERROR', l_attrs);
+            
+            IF p_trace_id IS NULL THEN
+                PLTelemetry.end_trace(l_trace_id);
+            END IF;
+            
+            RETURN l_result;
+    END execute_custom_plan;
+
 
 END PLT_SERVICE_DISCOVERY;
 /

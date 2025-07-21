@@ -68,6 +68,15 @@ AS
     -- Collection for runtime service info
     TYPE t_services_runtime IS TABLE OF t_service_runtime INDEX BY VARCHAR2(50);
 
+    -- Custom plan execution context for variable substitution
+    TYPE t_execution_context IS RECORD (
+        http_status         NUMBER,
+        http_response_time  NUMBER,
+        http_response_body  VARCHAR2(4000),
+        service_name        VARCHAR2(50),
+        tenant_id           VARCHAR2(100)
+    );
+
     --------------------------------------------------------------------------
     -- UTILITY FUNCTIONS
     --------------------------------------------------------------------------
@@ -309,6 +318,68 @@ AS
      * @return Current tenant ID or NULL if no tenant context set
      */
     FUNCTION get_current_tenant_id RETURN VARCHAR2;
+
+    -- =====================================================================
+    -- PLT_SERVICE_DISCOVERY - Custom Plan Executor Extension
+    -- Adding CUSTOM service support while maintaining ENDPOINT compatibility
+    -- =====================================================================
+
+    /**
+    * Execute a custom monitoring plan from JSON configuration
+    * Used for SERVICE_TYPE = 'CUSTOM' services
+    * 
+    * @param p_service_name Service name for context
+    * @param p_custom_plan_json JSON plan configuration
+    * @param p_trace_id Optional trace ID for distributed tracing
+    * @return Health check result compatible with ENDPOINT services
+    */
+    FUNCTION execute_custom_plan(
+        p_service_name IN VARCHAR2,
+        p_custom_plan_json IN VARCHAR2,
+        p_trace_id IN VARCHAR2 DEFAULT NULL
+    ) RETURN t_health_result;
+
+    /**
+    * Execute HTTP call action from custom plan
+    * 
+    * @param p_action_json JSON configuration for http_call action
+    * @param p_context Execution context for variable substitution
+    * @param p_span_id Span ID for telemetry
+    * @return Updated execution context with HTTP results
+    */
+    FUNCTION execute_http_call_action(
+        p_action_json IN VARCHAR2,
+        p_context IN OUT t_execution_context,
+        p_span_id IN VARCHAR2
+    ) RETURN t_execution_context;
+
+    /**
+    * Execute send_metric action from custom plan
+    * 
+    * @param p_action_json JSON configuration for send_metric action
+    * @param p_context Execution context for variable substitution
+    * @param p_span_id Span ID for telemetry
+    */
+    PROCEDURE execute_send_metric_action(
+        p_action_json IN VARCHAR2,
+        p_context IN t_execution_context,
+        p_span_id IN VARCHAR2
+    );
+
+    /**
+    * Substitute template variables in a string
+    * Supports {{http_status}}, {{http_response_time}}, etc.
+    * 
+    * @param p_template Template string with {{variable}} placeholders
+    * @param p_context Execution context with variable values
+    * @return String with variables substituted
+    */
+    FUNCTION substitute_template_variables(
+        p_template IN VARCHAR2,
+        p_context IN t_execution_context
+    ) RETURN VARCHAR2;
+
+    
 
 END PLT_SERVICE_DISCOVERY;
 /
