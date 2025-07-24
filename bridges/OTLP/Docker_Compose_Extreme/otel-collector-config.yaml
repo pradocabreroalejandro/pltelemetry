@@ -27,17 +27,17 @@ receivers:
             - targets: ['localhost:8888']
 
 processors:
-  # Batch processor 
+  # Batch processor for efficiency
   batch:
-    timeout: 500ms          
-    send_batch_size: 2048    
-    send_batch_max_size: 4096
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
 
   # Memory limiter to prevent OOM
   memory_limiter:
-    limit_mib: 1536       
-    spike_limit_mib: 512  
-    check_interval: 500ms 
+    limit_mib: 512
+    spike_limit_mib: 128
+    check_interval: 1s
 
   # Attributes processor for PLTelemetry specific handling
   attributes:

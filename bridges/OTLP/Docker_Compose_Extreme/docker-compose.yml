@@ -1,0 +1,371 @@
+# =============================================================================
+# PLTelemetry Master Stack - Everything in One Place
+# =============================================================================
+#
+# Complete PLTelemetry ecosystem with observability, infrastructure and examples
+# 
+# Stack includes:
+# - Observability: Grafana + Tempo + Loki + Prometheus + OTEL Collector
+# - Infrastructure: Oracle DB + ORDS + MailHog  
+# - Examples: All Node.js microservices + Financial API
+#
+# Usage:
+#   docker compose up -d
+#   Access:
+#     - Grafana: http://localhost:3020 (admin/admin)
+#     - Oracle DB: localhost:1521 (system/plt)
+#     - ORDS: http://localhost:8080
+#     - MailHog: http://localhost:8025
+#     - Financial API: http://localhost:3001
+#     - Example Services: 8001-8005
+#
+# =============================================================================
+
+services:
+  # =============================================================================
+  # INFRASTRUCTURE - Oracle Database & ORDS
+  # =============================================================================
+  
+  oracle-db:
+    image: container-registry.oracle.com/database/free:latest
+    container_name: oracle-plt
+    hostname: oracle-db
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 12G
+    environment:
+      - ORACLE_PWD=plt
+      - ORACLE_CHARACTERSET=AL32UTF8
+      - ENABLE_ARCHIVELOG=true
+      - ENABLE_FORCE_LOGGING=true
+    ports:
+      - "1521:1521"     # Database listener
+      - "5500:5500"     # Enterprise Manager
+    volumes:
+      # SACRED VOLUMES - DO NOT TOUCH! 🛐
+      - oracle-project_oracle_data:/opt/oracle/oradata
+      - oracle-project_oracle_backup:/opt/oracle/backup
+      - ./healthcheck.sql:/tmp/healthcheck.sql:ro
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "system/plt@//localhost:1521/FREE", "@/tmp/healthcheck.sql"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  oracle-ords:
+    image: container-registry.oracle.com/database/ords:latest
+    container_name: ords-for-plt
+    restart: unless-stopped
+    environment:
+      - ORDS_CONFIG_DIR=/etc/ords/config
+      - DBHOST=oracle-db              
+      - DBPORT=1521
+      - DBSERVICENAME=FREEPDB1
+      - ORACLE_PWD=plt
+      - CONN_STRING=sys/plt@oracle-db:1521/FREEPDB1
+      - APEX_PUBLIC_USER_PASSWORD=plt
+      - APEX_LISTENER_PASSWORD=plt
+      - APEX_REST_PASSWORD=plt
+      - PUBLIC_PASSWORD=plt
+    volumes:
+      - ords-config:/etc/ords/config
+    ports:
+      - "8080:8080"
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ords/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # =============================================================================
+  # OBSERVABILITY STACK - Grafana + Tempo + Loki + Prometheus + OTEL
+  # =============================================================================
+  
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: plt-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver (PLTelemetry uses this)
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:latest
+    container_name: plt-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./configs/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"   # Tempo API
+      - "9411:9411"   # Zipkin receiver
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+    user: "0"
+
+  loki:
+    image: grafana/loki:latest
+    container_name: plt-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./configs/loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"   # Loki API
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: plt-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"   # Prometheus UI
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: plt-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      # SMTP Configuration for email alerts
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=mailhog:1025
+      - GF_SMTP_SKIP_VERIFY=true
+      - GF_SMTP_FROM_ADDRESS=pltelemetry@grafana.local
+      - GF_SMTP_FROM_NAME=PLTelemetry Alerts
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3020:3000"   # Grafana UI
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+      - mailhog
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # =============================================================================
+  # COMMUNICATION - MailHog for testing emails
+  # =============================================================================
+  
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: plt-mailhog
+    ports:
+      - "1025:1025"   # SMTP port
+      - "8025:8025"   # Web UI port
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # =============================================================================
+  # EXAMPLE SERVICES - From example_02 (working services)
+  # =============================================================================
+  
+  oracle-reports:
+    build: .  # Uses local Dockerfile and services/
+    container_name: plt-oracle-reports
+    ports:
+      - "8001:8001"
+    environment:
+      - SERVICE_NAME=oracle-reports
+      - SERVICE_PORT=8001
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    command: npm run start:reports
+    restart: unless-stopped
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  weblogic-erp:
+    build: .  # Uses local Dockerfile and services/
+    container_name: plt-weblogic-erp
+    ports:
+      - "8002:8002"
+    environment:
+      - SERVICE_NAME=weblogic-erp
+      - SERVICE_PORT=8002
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    command: npm run start:weblogic
+    restart: unless-stopped
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  email-service:
+    build: .  # Uses local Dockerfile and services/
+    container_name: plt-email-service
+    ports:
+      - "8003:8003"
+    environment:
+      - SERVICE_NAME=email-service
+      - SERVICE_PORT=8003
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    command: npm run start:email
+    restart: unless-stopped
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  batch-processor:
+    build: .  # Uses local Dockerfile and services/
+    container_name: plt-batch-processor
+    ports:
+      - "8004:8004"
+    environment:
+      - SERVICE_NAME=batch-processor
+      - SERVICE_PORT=8004
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    command: npm run start:batch
+    restart: unless-stopped
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  document-service:
+    build: .  # Uses local Dockerfile and services/
+    container_name: plt-document-service
+    ports:
+      - "8005:8005"
+    environment:
+      - SERVICE_NAME=document-service
+      - SERVICE_PORT=8005
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+    command: npm run start:documents
+    restart: unless-stopped
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # =============================================================================
+  # FINANCIAL API - Advanced Example with ORDS Integration
+  # =============================================================================
+  
+  financial-service:
+    build:
+      context: ./financial_service  # Uses local finalcial_service folder
+    container_name: plt-financial-service
+    environment:
+      - NODE_ENV=production
+      - OTEL_SERVICE_NAME=financial-reports-api
+      - OTEL_SERVICE_VERSION=1.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - ORACLE_ORDS_URL=http://oracle-ords:8080
+      - PORT=3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      oracle-ords:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# =============================================================================
+# VOLUMES - Sacred and Regular
+# =============================================================================
+volumes:
+  # SACRED VOLUMES - DO NOT TOUCH! 🛐 (using real existing names)
+  oracle-project_oracle_data:
+    external: true
+  oracle-project_oracle_backup:
+    external: true
+  
+  # ORDS configuration
+  ords-config:
+    driver: local
+  
+  # Observability volumes
+  tempo-data:
+    driver: local
+  loki-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+# =============================================================================
+# NETWORK - One Network to Rule Them All
+# =============================================================================
+networks:
+  pltelemetry-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

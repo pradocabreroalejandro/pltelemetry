@@ -30,19 +30,27 @@ services:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: plt-otel-collector
     command: ["--config=/etc/otel-collector-config.yaml"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'          # Más CPU para procesar
+          memory: 2G           # Más memoria para buffers
+        reservations:
+          cpus: '1.0'
+          memory: 1G
     volumes:
-      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver (PLTelemetry uses this)
-      - "8888:8888"   # Prometheus metrics
-      - "8889:8889"   # Prometheus exporter metrics
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
     depends_on:
       - tempo
       - loki
       - prometheus
     networks:
-      - plt-demo
+      - pltelemetry-network
     restart: unless-stopped
 
   # =============================================================================
