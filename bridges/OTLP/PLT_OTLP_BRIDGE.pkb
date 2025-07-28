@@ -69,6 +69,21 @@ AS
             NULL; -- Never let error logging break the bridge
     END log_error_internal;
 
+    /**
+    * Safely free temporary CLOB to prevent memory leaks
+    */
+    PROCEDURE safe_free_temp_clob(p_clob IN OUT CLOB)
+    IS
+    BEGIN
+        IF p_clob IS NOT NULL AND DBMS_LOB.ISTEMPORARY(p_clob) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(p_clob);
+        END IF;
+        p_clob := NULL;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_clob := NULL; -- At least clear the reference
+    END safe_free_temp_clob;
+
     --------------------------------------------------------------------------
     -- JSON UTILITIES (ORACLE 12C+ NATIVE ONLY)
     --------------------------------------------------------------------------
@@ -189,59 +204,56 @@ AS
             RETURN NVL(l_result, '1640995200000000000'); -- Jan 1, 2022 as ultimate fallback
     END to_unix_nano;
     
-    FUNCTION convert_attributes_to_otlp(p_attrs_json VARCHAR2) RETURN CLOB
+    FUNCTION convert_attributes_to_otlp(p_attrs_json VARCHAR2)
+        RETURN CLOB
     IS
-        l_result CLOB;
-        l_json_obj JSON_OBJECT_T;
-        l_keys JSON_KEY_LIST;
-        l_attrs_array JSON_ARRAY_T;
-        l_attr_obj JSON_OBJECT_T;
-        l_value_obj JSON_OBJECT_T;
-        l_key VARCHAR2(255);
-        l_value VARCHAR2(4000);
+        l_result        CLOB;
+        l_json_obj      JSON_OBJECT_T;
+        l_keys          JSON_KEY_LIST;
+        l_key           VARCHAR2(255);
+        l_value         VARCHAR2(4000);
+        l_first         BOOLEAN := TRUE;
+        l_attr_json     VARCHAR2(1000);
     BEGIN
         DBMS_LOB.CREATETEMPORARY(l_result, TRUE);
+        DBMS_LOB.WRITEAPPEND(l_result, 1, '[');
         
         IF p_attrs_json IS NULL OR LENGTH(p_attrs_json) < 3 THEN
-            l_result := TO_CLOB('[]');
+            DBMS_LOB.WRITEAPPEND(l_result, 1, ']');
             RETURN l_result;
         END IF;
 
         -- Parse using native JSON
         l_json_obj := JSON_OBJECT_T.parse(p_attrs_json);
         l_keys := l_json_obj.get_keys();
-        l_attrs_array := JSON_ARRAY_T();
         
-        -- Convert each attribute to OTLP format
+        -- Process each key-value pair
         FOR i IN 1 .. l_keys.COUNT LOOP
             l_key := l_keys(i);
             l_value := l_json_obj.get_string(l_key);
             
-            -- Create OTLP attribute object
-            l_attr_obj := JSON_OBJECT_T();
-            l_value_obj := JSON_OBJECT_T();
-            
-            l_attr_obj.put('key', l_key);
-            l_value_obj.put('stringValue', NVL(l_value, ''));
-            l_attr_obj.put('value', l_value_obj);
-            
-            l_attrs_array.append(l_attr_obj);
+            -- Build OTLP attribute format
+            l_attr_json := '{"key":"' || REPLACE(l_key, '"', '\"') || 
+                        '","value":{"stringValue":"' || REPLACE(l_value, '"', '\"') || '"}}';
+
+            IF NOT l_first THEN
+                DBMS_LOB.WRITEAPPEND(l_result, 1, ',');
+            END IF;
+
+            DBMS_LOB.WRITEAPPEND(l_result, LENGTH(l_attr_json), l_attr_json);
+            l_first := FALSE;
         END LOOP;
 
-        l_result := l_attrs_array.to_clob();
+        DBMS_LOB.WRITEAPPEND(l_result, 1, ']');
         RETURN l_result;
         
     EXCEPTION
         WHEN OTHERS THEN
-            IF DBMS_LOB.ISTEMPORARY(l_result) = 1 THEN
-                DBMS_LOB.FREETEMPORARY(l_result);
-            END IF;
-            
-            log_error_internal('convert_attributes_to_otlp', 
-                             'Attribute conversion failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            -- FIXED: Proper cleanup with new utility
+            safe_free_temp_clob(l_result);
             
             DBMS_LOB.CREATETEMPORARY(l_result, TRUE);
-            l_result := TO_CLOB('[]');
+            DBMS_LOB.WRITEAPPEND(l_result, 2, '[]');
             RETURN l_result;
     END convert_attributes_to_otlp;
     
@@ -489,6 +501,8 @@ AS
         l_content_size NUMBER;
         l_offset       NUMBER := 1;
         l_amount       NUMBER;
+        l_request_started BOOLEAN := FALSE;
+        l_response_started BOOLEAN := FALSE;
     BEGIN
         IF p_endpoint IS NULL THEN
             log_error_internal('send_to_endpoint', 'Endpoint not configured');
@@ -505,6 +519,7 @@ AS
         
         UTL_HTTP.SET_TRANSFER_TIMEOUT(g_timeout);
         l_req := UTL_HTTP.BEGIN_REQUEST(p_endpoint, 'POST', 'HTTP/1.1');
+        l_request_started := TRUE;
         
         -- OTLP standard headers
         UTL_HTTP.SET_HEADER(l_req, 'Content-Type', 'application/json; charset=utf-8');
@@ -526,6 +541,7 @@ AS
         END IF;
         
         l_res := UTL_HTTP.GET_RESPONSE(l_req);
+        l_response_started := TRUE;
         
         -- Handle response
         IF l_res.status_code NOT IN (200, 201, 202, 204) THEN
@@ -549,12 +565,27 @@ AS
         END IF;
         
         UTL_HTTP.END_RESPONSE(l_res);
+        l_response_started := FALSE;
         
     EXCEPTION
         WHEN OTHERS THEN
             log_error_internal('send_to_endpoint', 
                              'HTTP communication failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200), 
                              p_endpoint);
+
+            -- Cleanup response and request
+            IF l_response_started THEN
+                BEGIN
+                    UTL_HTTP.END_RESPONSE(l_res);
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+            END IF;
+            
+            IF l_request_started THEN
+                BEGIN
+                    UTL_HTTP.END_REQUEST(l_req);
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+            END IF;
+
             BEGIN
                 UTL_HTTP.END_RESPONSE(l_res);
             EXCEPTION
@@ -716,7 +747,9 @@ AS
                     END IF;
                     
                     l_attrs_otlp := convert_attributes_to_otlp(l_event_attrs);
-                    
+
+                    --log_error_internal('debug_json', 'l_attrs_otlp content: ' || SUBSTR(l_attrs_otlp, 1, 1000));
+
                     l_events_array.append(JSON_OBJECT_T('{
                         "timeUnixNano": "' || to_unix_nano(l_event_time) || '",
                         "name": "' || escape_json_string(l_event_name) || '",
@@ -730,6 +763,8 @@ AS
                 END LOOP;
             EXCEPTION
                 WHEN OTHERS THEN
+                    safe_free_temp_clob(l_final_json);
+                    safe_free_temp_clob(l_attrs_otlp);
                     log_error_internal('send_trace_otlp', 'Failed to parse events: ' || SUBSTR(SQLERRM, 1, 200));
             END;
         END IF;
@@ -801,7 +836,7 @@ AS
         
     EXCEPTION
         WHEN OTHERS THEN
-            log_error_internal('send_trace_otlp', 'Native JSON trace failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000));
+            log_error_internal('send_trace_otlp', 'Native JSON trace failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace||' => '||l_final_json, 1, 4000));
     END send_trace_otlp;
     
     PROCEDURE send_metric_otlp(p_json VARCHAR2)
@@ -896,10 +931,6 @@ AS
             l_attributes := JSON_ARRAY_T.parse(convert_attributes_to_otlp(l_attrs_json));
         END IF;
         
-        -- Auto-inject tenant.id as dataPoint attribute (ALWAYS)
-        IF g_tenant_id IS NOT NULL THEN
-            l_attributes.append(JSON_OBJECT_T('{"key":"tenant.id","value":{"stringValue":"' || g_tenant_id || '"}}'));
-        END IF;
         
         -- CRITICAL: Handle trace correlation vs business metrics differently
         IF l_is_business_metric THEN

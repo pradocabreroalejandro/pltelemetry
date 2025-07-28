@@ -308,6 +308,10 @@ AS
     IS
     BEGIN
         IF NOT g_telemetry_configured THEN
+
+            -- Initialize PLTelemetry failover system
+            --PLTelemetry.initialize_failover_system();
+
             -- Configure PLTelemetry for service discovery
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');

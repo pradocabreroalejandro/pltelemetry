@@ -284,5 +284,94 @@ INSERT INTO plt_failover_config (config_key, config_value, description) VALUES
     ('OTLP_SERVICE_VERSION', '1.0.0', 'Service version for OTLP telemetry'),
     ('OTLP_ENVIRONMENT', 'production', 'Deployment environment');
 
+INSERT INTO plt_failover_config (
+    config_key, 
+    config_value, 
+    description, 
+    updated_at
+) VALUES (
+    'AGENT_PULSE_MODE', 
+    'PULSE1', 
+    'Current agent throttling pulse mode (PULSE1, PULSE2, PULSE3, PULSE4, COMA)', 
+    SYSTIMESTAMP
+);
+
+
+COMMIT;
+/
+
+-- ========================================================================
+-- PLTelemetry Pulse Throttling System
+-- ========================================================================
+-- This script creates the throttling configuration table and functions
+-- to coordinate throttling between the Go agent and PLTelemetry core
+-- ========================================================================
+
+PROMPT Creating PLTelemetry Pulse Throttling System...
+
+-- ========================================================================
+-- 1. THROTTLING CONFIGURATION TABLE
+-- ========================================================================
+
+CREATE TABLE plt_pulse_throttling_config (
+    pulse_mode           VARCHAR2(10) PRIMARY KEY,
+    capacity_multiplier  NUMBER(5,4) NOT NULL,
+    batch_multiplier     NUMBER(5,4) NOT NULL, 
+    interval_multiplier  NUMBER(5,2) NOT NULL,
+    sampling_rate        NUMBER(5,4) NOT NULL,
+    metrics_enabled      VARCHAR2(1) DEFAULT 'Y' CHECK (metrics_enabled IN ('Y', 'N')),
+    logs_enabled         VARCHAR2(1) DEFAULT 'Y' CHECK (logs_enabled IN ('Y', 'N')),
+    queue_processing     VARCHAR2(1) DEFAULT 'Y' CHECK (queue_processing IN ('Y', 'N')),
+    description          VARCHAR2(200),
+    is_active           VARCHAR2(1) DEFAULT 'Y' CHECK (is_active IN ('Y', 'N')),
+    created_at          TIMESTAMP DEFAULT SYSTIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+COMMENT ON TABLE plt_pulse_throttling_config IS 'Pulse mode throttling configuration for coordinated capacity management';
+COMMENT ON COLUMN plt_pulse_throttling_config.pulse_mode IS 'Pulse mode from Go agent: PULSE1, PULSE2, PULSE3, PULSE4, COMA';
+COMMENT ON COLUMN plt_pulse_throttling_config.capacity_multiplier IS 'Overall system capacity multiplier (0.0-1.0)';
+COMMENT ON COLUMN plt_pulse_throttling_config.batch_multiplier IS 'Batch size multiplier for queue processing';
+COMMENT ON COLUMN plt_pulse_throttling_config.interval_multiplier IS 'Scheduler interval multiplier (>1 = slower)';
+COMMENT ON COLUMN plt_pulse_throttling_config.sampling_rate IS 'Telemetry sampling rate (0.0-1.0, 1.0=100%)';
+COMMENT ON COLUMN plt_pulse_throttling_config.metrics_enabled IS 'Enable/disable metrics collection';
+COMMENT ON COLUMN plt_pulse_throttling_config.logs_enabled IS 'Enable/disable log collection';
+COMMENT ON COLUMN plt_pulse_throttling_config.queue_processing IS 'Enable/disable queue processing';
+
+-- ========================================================================
+-- 2. DEFAULT THROTTLING CONFIGURATIONS
+-- ========================================================================
+
+-- Insert default configurations (fully configurable per environment)
+INSERT INTO plt_pulse_throttling_config (
+    pulse_mode, capacity_multiplier, batch_multiplier, interval_multiplier, 
+    sampling_rate, metrics_enabled, logs_enabled, queue_processing, description
+) VALUES 
+('PULSE1', 1.0000, 1.0000, 1.00, 1.0000, 'Y', 'Y', 'Y', 'Full capacity - no throttling'),
+('PULSE2', 0.5000, 0.5000, 2.00, 0.7500, 'Y', 'Y', 'Y', 'Half capacity - moderate load'),
+('PULSE3', 0.2500, 0.2500, 4.00, 0.5000, 'Y', 'Y', 'Y', 'Quarter capacity - high load'),
+('PULSE4', 0.1000, 0.1000, 10.0, 0.2500, 'Y', 'Y', 'Y', 'Minimal capacity - critical load'),
+('COMA',   0.0000, 0.0100, 60.0, 0.0500, 'N', 'N', 'N', 'Hibernation mode - system overload');
+
+-- ========================================================================
+-- 3. PULSE THROTTLING TYPE FOR PL/SQL
+-- ========================================================================
+
+CREATE OR REPLACE TYPE plt_pulse_config_t AS OBJECT (
+    pulse_mode           VARCHAR2(10),
+    capacity_multiplier  NUMBER,
+    batch_multiplier     NUMBER,
+    interval_multiplier  NUMBER,
+    sampling_rate        NUMBER,
+    metrics_enabled      VARCHAR2(1),
+    logs_enabled         VARCHAR2(1),
+    queue_processing     VARCHAR2(1),
+    description          VARCHAR2(200)
+);
+/
+
+CREATE INDEX idx_plt_pulse_config_active ON plt_pulse_throttling_config(is_active, pulse_mode);
+
+
 COMMIT;
 /

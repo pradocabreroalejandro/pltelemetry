@@ -400,6 +400,10 @@ CREATE OR REPLACE PACKAGE BODY PLT_DB_MONITOR AS
     PROCEDURE configure_telemetry IS
     BEGIN
         IF NOT g_telemetry_configured THEN
+
+            -- Initialize PLTelemetry failover system
+            --PLTelemetry.initialize_failover_system();
+
             -- SIMPLIFIED: Minimal telemetry config for demo
             PLTelemetry.set_backend_url('OTLP_BRIDGE');
             PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');

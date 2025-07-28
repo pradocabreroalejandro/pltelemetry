@@ -1,5 +1,5 @@
 # =============================================================================
-# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - FIXED PROMETHEUS LABELS
+# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - FIXED FOR AGENT METRICS
 # File: otel-collector-config.yaml
 # =============================================================================
 
@@ -27,34 +27,27 @@ receivers:
             - targets: ['localhost:8888']
 
 processors:
-  # Batch processor for efficiency
+  # Batch processor
   batch:
-    timeout: 1s
-    send_batch_size: 1024
-    send_batch_max_size: 2048
+    timeout: 500ms
+    send_batch_size: 2048
+    send_batch_max_size: 4096
 
   # Memory limiter to prevent OOM
   memory_limiter:
-    limit_mib: 512
-    spike_limit_mib: 128
-    check_interval: 1s
+    limit_mib: 1536
+    spike_limit_mib: 512
+    check_interval: 500ms
 
   # Attributes processor for PLTelemetry specific handling
   attributes:
     actions:
-      # Rename Oracle-specific attributes to standard names
-      - key: db.statement
-        from_attribute: oracle.sql
-        action: insert
-      - key: db.operation
-        from_attribute: oracle.operation
-        action: insert
       # Add source identification
       - key: telemetry.source
         value: "oracle-plsql"
         action: insert
 
-  # 🔥 NEW: Resource processor to avoid label conflicts
+  # 🔥 FIXED: Resource processor - BACK TO WORKING VERSION
   resource:
     attributes:
       # Remove conflicting resource attributes before prometheus export
@@ -81,17 +74,16 @@ exporters:
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
 
-  # 🔥 FIXED: Prometheus exporter without conflicting labels
+  # 🔥 FIXED: Prometheus exporter - BACK TO WORKING CONFIG
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "pltelemetry"
-    # 🔥 REMOVED: const_labels that were causing conflicts
     send_timestamps: true
     metric_expiration: 180m
-    # 🔥 NEW: Avoid resource attribute conflicts
+    # 🔥 CRITICAL: This was the issue - set back to false
     resource_to_telemetry_conversion:
       enabled: false
-    # 🔥 NEW: Enable metric relabeling
+    # Enable metric relabeling
     enable_open_metrics: true
 
   # Debug output for development
@@ -112,7 +104,7 @@ service:
       processors: [memory_limiter, resource, batch]
       exporters: [otlp/tempo, debug]
 
-    # 🔥 FIXED: Metrics pipeline with resource processor
+    # 🔥 FIXED: Metrics pipeline with proper resource handling
     metrics:
       receivers: [otlp, prometheus]
       processors: [memory_limiter, resource, batch]

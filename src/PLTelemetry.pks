@@ -612,6 +612,65 @@ AS
      */
     FUNCTION is_circuit_open RETURN BOOLEAN;
 
+    -- ========================================================================
+    -- PULSE THROTTLING MANAGEMENT
+    -- ========================================================================
+
+    /**
+     * Get current agent pulse mode from failover config
+     * @return VARCHAR2 - Current pulse mode (PULSE1, PULSE2, PULSE3, PULSE4, COMA)
+     */
+    FUNCTION get_agent_pulse_mode RETURN VARCHAR2;
+
+    /**
+     * Get throttling configuration for specific pulse mode
+     * @param p_pulse_mode Pulse mode to get config for
+     * @return plt_pulse_config_t - Complete throttling configuration
+     */
+    FUNCTION get_pulse_throttling_config(p_pulse_mode VARCHAR2) RETURN plt_pulse_config_t;
+
+    /**
+     * Apply pulse throttling to a numeric value
+     * @param p_original_value Original value to throttle
+     * @param p_multiplier_type Type of multiplier: BATCH, INTERVAL, SAMPLING, CAPACITY
+     * @return NUMBER - Throttled value
+     */
+    FUNCTION apply_pulse_throttling(
+        p_original_value NUMBER, 
+        p_multiplier_type VARCHAR2
+    ) RETURN NUMBER;
+
+    /**
+     * Check if specific telemetry type should be processed based on pulse mode
+     * @param p_telemetry_type Type to check: METRICS, LOGS, QUEUE
+     * @return BOOLEAN - TRUE if should process, FALSE if throttled
+     */
+    FUNCTION should_process_telemetry(p_telemetry_type VARCHAR2) RETURN BOOLEAN;
+
+    /**
+     * Get effective batch size based on current pulse mode
+     * @param p_requested_batch_size Original requested batch size
+     * @return NUMBER - Effective batch size after throttling
+     */
+    FUNCTION get_effective_batch_size(p_requested_batch_size NUMBER) RETURN NUMBER;
+
+    /**
+     * Check if telemetry should be sampled based on pulse mode
+     * @return BOOLEAN - TRUE if should sample this telemetry event
+     */
+    FUNCTION should_sample_telemetry RETURN BOOLEAN;
+
+    /**
+     * Update scheduler job intervals based on current pulse mode
+     * @param p_job_name Scheduler job name to update
+     */
+    PROCEDURE update_job_interval_for_pulse(p_job_name VARCHAR2);
+
+    /**
+     * Get the current pulse throttling configuration
+     * @return plt_pulse_config_t - Current pulse throttling configuration
+     */
+    PROCEDURE safe_free_temp_clob(p_clob IN OUT CLOB);
 
 END PLTelemetry;
 /

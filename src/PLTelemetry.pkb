@@ -51,6 +51,56 @@ AS
             NULL; -- Never let error logging break anything
     END log_error_internal;
 
+    /**
+    * Safely free temporary CLOB to prevent memory leaks
+    */
+    PROCEDURE safe_free_temp_clob(p_clob IN OUT CLOB)
+    IS
+    BEGIN
+        IF p_clob IS NOT NULL AND DBMS_LOB.ISTEMPORARY(p_clob) = 1 THEN
+            DBMS_LOB.FREETEMPORARY(p_clob);
+        END IF;
+        p_clob := NULL;
+    EXCEPTION
+        WHEN OTHERS THEN
+            p_clob := NULL; -- At least clear the reference
+    END safe_free_temp_clob;
+
+    /**
+    * Properly escape string for JSON (handles newlines, tabs, quotes, etc.)
+    */
+    FUNCTION escape_json_string(p_input VARCHAR2) RETURN VARCHAR2
+    IS
+        l_output VARCHAR2(4000);
+    BEGIN
+        IF p_input IS NULL THEN
+            RETURN '';
+        END IF;
+        
+        l_output := p_input;
+        
+        -- Escape in correct order (backslash FIRST!)
+        l_output := REPLACE(l_output, '\', '\\');     -- \ -> \\
+        l_output := REPLACE(l_output, '"', '\"');     -- " -> \"
+        l_output := REPLACE(l_output, CHR(10), '\n'); -- newline -> \n
+        l_output := REPLACE(l_output, CHR(13), '\r'); -- carriage return -> \r
+        l_output := REPLACE(l_output, CHR(9), '\t');  -- tab -> \t
+        l_output := REPLACE(l_output, CHR(8), '\b');  -- backspace -> \b
+        l_output := REPLACE(l_output, CHR(12), '\f'); -- form feed -> \f
+        
+        -- Truncate if too long
+        IF LENGTH(l_output) > 3900 THEN
+            l_output := SUBSTR(l_output, 1, 3900) || '...[TRUNCATED]';
+        END IF;
+        
+        RETURN l_output;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Ultra-safe fallback: just remove problematic chars
+            RETURN REPLACE(REPLACE(REPLACE(NVL(p_input, ''), '"', '\"'), CHR(10), ' '), CHR(13), ' ');
+    END escape_json_string;
+
     --------------------------------------------------------------------------
     -- CORE ID GENERATION
     --------------------------------------------------------------------------
@@ -320,8 +370,9 @@ AS
     --------------------------------------------------------------------------
 
     /**
-     * Sends telemetry data synchronously via HTTP
-     */
+    * Sends telemetry data synchronously via HTTP with pulse throttling
+    * Updated to respect pulse mode capacity and apply intelligent retry logic
+    */
     PROCEDURE send_to_backend_sync (p_json VARCHAR2)
     IS
         l_req           UTL_HTTP.REQ;
@@ -335,29 +386,87 @@ AS
         l_chunk         VARCHAR2(32767);
         l_current_mode  VARCHAR2(50);
         l_effective_backend VARCHAR2(500);
+        l_pulse_mode    VARCHAR2(10);
+        l_config        plt_pulse_config_t;
+        l_timeout       NUMBER;
+        l_chunk_size    NUMBER;
+        l_retry_delay   NUMBER;
+        l_start_time    TIMESTAMP := SYSTIMESTAMP;
+        l_end_time      TIMESTAMP;
+        l_duration_ms   NUMBER;
     BEGIN
         -- Validate input
         IF p_json IS NULL THEN
             RETURN;
         END IF;
 
+        -- ========================================================================
+        -- PULSE THROTTLING ANALYSIS AND CONFIGURATION
+        -- ========================================================================
+        
+        -- Get current pulse mode and configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Apply pulse-aware timeout adjustments
+        l_timeout := CASE l_pulse_mode
+            WHEN 'PULSE1' THEN NVL(g_backend_timeout, 30)        -- Normal timeout
+            WHEN 'PULSE2' THEN NVL(g_backend_timeout, 30) * 1.5  -- 50% longer timeout
+            WHEN 'PULSE3' THEN NVL(g_backend_timeout, 30) * 2    -- Double timeout
+            WHEN 'PULSE4' THEN NVL(g_backend_timeout, 30) * 3    -- Triple timeout
+            WHEN 'COMA'   THEN NVL(g_backend_timeout, 30) * 5    -- Very long timeout (if processing at all)
+            ELSE NVL(g_backend_timeout, 30)
+        END;
+        
+        -- Apply pulse-aware chunk size (smaller chunks in throttled modes)
+        l_chunk_size := CASE l_pulse_mode
+            WHEN 'PULSE1' THEN 32767
+            WHEN 'PULSE2' THEN 16384  -- 16KB chunks
+            WHEN 'PULSE3' THEN 8192   -- 8KB chunks
+            WHEN 'PULSE4' THEN 4096   -- 4KB chunks
+            WHEN 'COMA'   THEN 2048   -- 2KB chunks
+            ELSE 32767
+        END;
+        
+        -- Calculate retry delay based on pulse mode
+        l_retry_delay := CASE l_pulse_mode
+            WHEN 'PULSE1' THEN 0.1    -- 100ms
+            WHEN 'PULSE2' THEN 0.2    -- 200ms
+            WHEN 'PULSE3' THEN 0.5    -- 500ms
+            WHEN 'PULSE4' THEN 1.0    -- 1 second
+            WHEN 'COMA'   THEN 2.0    -- 2 seconds
+            ELSE 0.1
+        END;
+
+        -- ========================================================================
+        -- BACKEND SELECTION WITH PULSE AWARENESS
+        -- ========================================================================
+        
         -- Check if we're in fallback mode
         l_current_mode := get_processing_mode();
         
-        -- Determine which backend to use
+        -- Determine which backend to use with pulse context
         IF l_current_mode = 'ORACLE_FALLBACK' THEN
-            -- Use the fallback backend (OTLP Bridge)
+            -- Use the fallback backend (OTLP Bridge by default)
             l_effective_backend := NVL(get_failover_config('FALLBACK_BACKEND'), 'OTLP_BRIDGE');
             
             IF l_effective_backend = 'OTLP_BRIDGE' THEN
-                -- Route through OTLP Bridge
+
+                -- Route through OTLP Bridge with pulse-aware configuration
                 BEGIN
+                    -- Configure OTLP Bridge for current pulse mode
+                    PLT_OTLP_BRIDGE.set_timeout(TRUNC(l_timeout));
+                    --PLT_OTLP_BRIDGE.set_debug_mode(l_pulse_mode IN ('PULSE4', 'COMA'));
+                    
                     PLT_OTLP_BRIDGE.route_to_otlp(p_json);
+
                     RETURN;
                 EXCEPTION
                     WHEN OTHERS THEN
+                        
                         l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                        log_error_internal('send_to_backend_sync', 'OTLP bridge routing failed in fallback mode: ' || l_error_msg);
+                        log_error_internal('send_to_backend_sync', 
+                            'OTLP bridge routing failed in fallback mode (Pulse: ' || l_pulse_mode || '): ' || l_error_msg);
                         RETURN;
                 END;
             ELSE
@@ -367,9 +476,13 @@ AS
         ELSE
             -- Normal mode - use configured backend
             l_effective_backend := g_backend_url;
+
         END IF;
 
-        -- ===== BRIDGE SUPPORT =====
+        -- ========================================================================
+        -- BRIDGE SUPPORT WITH PULSE CONTEXT
+        -- ========================================================================
+        
         IF l_effective_backend = 'POSTGRES_BRIDGE' THEN
             BEGIN
                 PLT_POSTGRES_BRIDGE.send_to_backend_with_routing(p_json);
@@ -377,57 +490,88 @@ AS
             EXCEPTION
                 WHEN OTHERS THEN
                     l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('send_to_backend_sync', 'Postgres bridge routing failed: ' || l_error_msg);
+                    log_error_internal('send_to_backend_sync', 
+                        'Postgres bridge routing failed (Pulse: ' || l_pulse_mode || '): ' || l_error_msg);
                     RETURN;
             END;
         ELSIF l_effective_backend = 'OTLP_BRIDGE' THEN
             BEGIN
+                -- Configure OTLP Bridge for current pulse mode
+                PLT_OTLP_BRIDGE.set_timeout(TRUNC(l_timeout));
+                --PLT_OTLP_BRIDGE.set_debug_mode(l_pulse_mode IN ('PULSE4', 'COMA'));
+                
                 PLT_OTLP_BRIDGE.route_to_otlp(p_json);
                 RETURN;
             EXCEPTION
                 WHEN OTHERS THEN
                     l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('send_to_backend_sync', 'OTLP bridge routing failed: ' || l_error_msg);
+                    log_error_internal('send_to_backend_sync', 
+                        'OTLP bridge routing failed (Pulse: ' || l_pulse_mode || '): ' || l_error_msg);
                     RETURN;
             END;
         END IF;
-        -- ===== END BRIDGE SUPPORT =====
 
+        -- ========================================================================
+        -- HTTP TRANSMISSION WITH PULSE THROTTLING
+        -- ========================================================================
+        
         -- Get length and validate URL (for HTTP backends)
         l_length := LENGTH(p_json);
 
         IF l_effective_backend IS NULL OR LENGTH(l_effective_backend) < 10 THEN
-            log_error_internal('send_to_backend_sync', 'Invalid backend URL configured: ' || NVL(l_effective_backend, 'NULL'));
+            log_error_internal('send_to_backend_sync', 
+                'Invalid backend URL configured (Pulse: ' || l_pulse_mode || '): ' || NVL(l_effective_backend, 'NULL'));
             RETURN;
         END IF;
 
-        -- Set timeout and begin request
-        UTL_HTTP.SET_TRANSFER_TIMEOUT(NVL(g_backend_timeout, 30));
+        -- Add pre-transmission delay in high-throttling modes
+        IF l_pulse_mode IN ('PULSE4', 'COMA') THEN
+            DBMS_LOCK.SLEEP(l_retry_delay * 0.1); -- Small delay before even starting
+        END IF;
+
+        -- Set timeout and begin request with pulse-aware settings
+        UTL_HTTP.SET_TRANSFER_TIMEOUT(l_timeout);
         l_req := UTL_HTTP.BEGIN_REQUEST(l_effective_backend, 'POST', 'HTTP/1.1');
 
-        -- Set headers
+        -- Set headers with pulse context
         UTL_HTTP.SET_HEADER(l_req, 'Content-Type', 'application/json; charset=utf-8');
         UTL_HTTP.SET_HEADER(l_req, 'Content-Length', LENGTHB(p_json));
+        UTL_HTTP.SET_HEADER(l_req, 'User-Agent', 'PLTelemetry-Pulse-' || l_pulse_mode);
         UTL_HTTP.SET_HEADER(l_req, 'X-OTel-Source', 'PLTelemetry');
         UTL_HTTP.SET_HEADER(l_req, 'X-PLSQL-API-KEY', NVL(g_api_key, 'not-configured'));
         UTL_HTTP.SET_HEADER(l_req, 'X-PLSQL-DB', SYS_CONTEXT('USERENV', 'DB_NAME'));
+        UTL_HTTP.SET_HEADER(l_req, 'X-PLT-Pulse-Mode', l_pulse_mode);
+        UTL_HTTP.SET_HEADER(l_req, 'X-PLT-Capacity', TO_CHAR(l_config.capacity_multiplier, 'FM0.9999'));
 
-        -- Send data
-        IF l_length <= 32767 THEN
+        -- Send data with pulse-aware chunking
+        IF l_length <= l_chunk_size THEN
             UTL_HTTP.WRITE_TEXT(l_req, p_json);
         ELSE
-            -- Send in chunks
+            -- Send in pulse-aware chunks with optional delays
             WHILE l_offset <= l_length LOOP
-                l_amount := LEAST(32767, l_length - l_offset + 1);
+                l_amount := LEAST(l_chunk_size, l_length - l_offset + 1);
                 l_buffer := SUBSTR(p_json, l_offset, l_amount);
                 UTL_HTTP.WRITE_TEXT(l_req, l_buffer);
                 l_offset := l_offset + l_amount;
+                
+                -- Add micro-delay between chunks in throttled modes
+                IF l_pulse_mode IN ('PULSE3', 'PULSE4', 'COMA') AND l_offset <= l_length THEN
+                    DBMS_LOCK.SLEEP(0.001); -- 1ms delay between chunks
+                END IF;
             END LOOP;
         END IF;
 
         l_res := UTL_HTTP.GET_RESPONSE(l_req);
 
-        -- Check response status
+        -- ========================================================================
+        -- RESPONSE HANDLING WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Calculate duration for metrics
+        l_end_time := SYSTIMESTAMP;
+        l_duration_ms := EXTRACT(SECOND FROM (l_end_time - l_start_time)) * 1000;
+
+        -- Check response status with pulse-aware error handling
         IF l_res.status_code NOT IN (200, 201, 202, 204) THEN
             -- Read response body
             BEGIN
@@ -440,7 +584,7 @@ AS
                     NULL;
             END;
             
-            -- Log failed export
+            -- Log failed export with pulse context
             INSERT INTO plt_failed_exports (
                 export_time,
                 http_status,
@@ -450,32 +594,79 @@ AS
                 SYSTIMESTAMP,
                 l_res.status_code,
                 SUBSTR(p_json, 1, 4000),
-                'HTTP ' || l_res.status_code || ': ' || SUBSTR(l_response_body, 1, 3000)
+                'HTTP ' || l_res.status_code || ': ' || SUBSTR(l_response_body, 1, 3000) ||
+                ' (Pulse: ' || l_pulse_mode || ', Duration: ' || ROUND(l_duration_ms, 1) || 'ms)'
             );
         END IF;
 
         UTL_HTTP.END_RESPONSE(l_res);
 
+        -- ========================================================================
+        -- PULSE PERFORMANCE METRICS
+        -- ========================================================================
+        
+        -- Record pulse-aware performance metrics (sampled)
+        IF should_process_telemetry('METRICS') AND MOD(EXTRACT(SECOND FROM SYSTIMESTAMP), 30) = 0 THEN
+            BEGIN
+                log_metric(
+                    p_metric_name => 'pltelemetry.http.request_duration',
+                    p_value => l_duration_ms,
+                    p_unit => 'ms',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                log_metric(
+                    p_metric_name => 'pltelemetry.http.payload_size',
+                    p_value => l_length,
+                    p_unit => 'bytes',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                -- Pulse effectiveness metric
+                log_metric(
+                    p_metric_name => 'pltelemetry.http.pulse_timeout_used',
+                    p_value => l_timeout,
+                    p_unit => 'seconds',
+                    p_include_trace_correlation => FALSE
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on metrics
+            END;
+        END IF;
+
         IF g_autocommit THEN
             COMMIT;
         END IF;
 
+    -- Fix for send_to_backend_sync() - UTL_HTTP resource protection
+    -- Replace the existing exception handling block with this:
+
     EXCEPTION
         WHEN UTL_HTTP.TRANSFER_TIMEOUT THEN
-            l_error_msg := 'Backend timeout after ' || NVL(g_backend_timeout, 30) || ' seconds';
+            l_error_msg := 'Backend timeout after ' || l_timeout || ' seconds (Pulse: ' || l_pulse_mode || ')';
             
-            -- Clean up
+            -- Clean up resources properly
             BEGIN
-                IF l_res.status_code IS NOT NULL THEN
-                    UTL_HTTP.END_RESPONSE(l_res);
-                END IF;
+                UTL_HTTP.END_RESPONSE(l_res);
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+            
+            BEGIN
+                UTL_HTTP.END_REQUEST(l_req);
             EXCEPTION
                 WHEN OTHERS THEN NULL;
             END;
 
-            -- Log timeout
+            -- Log timeout with pulse context
             INSERT INTO plt_failed_exports (export_time, payload, error_message)
             VALUES (SYSTIMESTAMP, SUBSTR(p_json, 1, 4000), l_error_msg);
+
+            -- Add retry delay in throttled modes
+            IF l_pulse_mode IN ('PULSE3', 'PULSE4', 'COMA') THEN
+                DBMS_LOCK.SLEEP(l_retry_delay);
+            END IF;
 
             IF g_autocommit THEN
                 COMMIT;
@@ -484,16 +675,20 @@ AS
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
 
-            -- Clean up
+            -- Clean up resources properly
             BEGIN
-                IF l_res.status_code IS NOT NULL THEN
-                    UTL_HTTP.END_RESPONSE(l_res);
-                END IF;
+                UTL_HTTP.END_RESPONSE(l_res);
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+            
+            BEGIN
+                UTL_HTTP.END_REQUEST(l_req);
             EXCEPTION
                 WHEN OTHERS THEN NULL;
             END;
 
-            -- Log error
+            -- Log error with pulse context
             INSERT INTO plt_failed_exports (
                 export_time,
                 payload,
@@ -502,9 +697,15 @@ AS
             ) VALUES (
                 SYSTIMESTAMP,
                 SUBSTR(p_json, 1, 4000),
-                'Error: ' || l_error_msg,
+                'Error (Pulse: ' || l_pulse_mode || ', Duration: ' || 
+                EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000 || 'ms): ' || l_error_msg,
                 -1
             );
+
+            -- Add retry delay in throttled modes
+            IF l_pulse_mode IN ('PULSE3', 'PULSE4', 'COMA') THEN
+                DBMS_LOCK.SLEEP(l_retry_delay);
+            END IF;
 
             IF g_autocommit THEN
                 COMMIT;
@@ -512,27 +713,69 @@ AS
     END send_to_backend_sync;
 
     /**
-     * Sends telemetry data to the configured backend
-     */
+    * Sends telemetry data to the configured backend
+    * Updated with pulse throttling and intelligent queuing decisions
+    */
     PROCEDURE send_to_backend (p_json VARCHAR2)
     IS
         l_error_msg    VARCHAR2(4000);
         l_data_type    VARCHAR2(20);
+        l_pulse_mode   VARCHAR2(10);
+        l_should_queue BOOLEAN := FALSE;
+        l_config       plt_pulse_config_t;
+        l_payload_size NUMBER;
     BEGIN
         IF p_json IS NULL THEN
             RETURN;
         END IF;
 
-        -- Bridge-specific async handling
-        IF g_backend_url = 'POSTGRES_BRIDGE' AND g_async_mode THEN
-            -- Determine data type for ordering
-            l_data_type := CASE 
-                WHEN p_json LIKE '%"duration_ms"%' THEN 'SPAN'
-                WHEN p_json LIKE '%"name"%' AND p_json LIKE '%"value"%' THEN 'METRIC'
-                ELSE 'OTHER'
-            END;
-            
-            -- Queue with priority
+        -- ========================================================================
+        -- PULSE THROTTLING ANALYSIS
+        -- ========================================================================
+        
+        -- Get current pulse mode and configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        l_payload_size := LENGTH(p_json);
+        
+        -- Determine data type for intelligent routing
+        l_data_type := CASE 
+            WHEN p_json LIKE '%"duration_ms"%' THEN 'SPAN'
+            WHEN p_json LIKE '%"name"%' AND p_json LIKE '%"value"%' THEN 'METRIC'
+            WHEN p_json LIKE '%"severity"%' AND p_json LIKE '%"message"%' THEN 'LOG'
+            ELSE 'OTHER'
+        END;
+        
+        -- Apply telemetry type throttling
+        IF NOT should_process_telemetry(l_data_type) THEN
+            -- In COMA mode or if this telemetry type is disabled, drop silently
+            -- Only log if in debug mode and not in COMA (to avoid log spam)
+            IF l_pulse_mode != 'COMA' THEN
+                log_error_internal('send_to_backend', 
+                    'Telemetry type ' || l_data_type || ' dropped due to pulse throttling: ' || l_pulse_mode);
+            END IF;
+            RETURN;
+        END IF;
+        
+        -- ========================================================================
+        -- INTELLIGENT QUEUING DECISIONS BASED ON PULSE MODE
+        -- ========================================================================
+        
+        -- In low capacity modes, prefer async to reduce immediate load
+        l_should_queue := CASE
+            WHEN l_pulse_mode IN ('PULSE4', 'COMA') THEN TRUE  -- Always queue in critical modes
+            WHEN l_pulse_mode = 'PULSE3' AND l_payload_size > 1000 THEN TRUE  -- Queue large payloads
+            WHEN l_pulse_mode = 'PULSE2' AND l_payload_size > 2000 THEN TRUE  -- Queue very large payloads
+            ELSE g_async_mode  -- Use configured mode for normal operation
+        END;
+
+        -- ========================================================================
+        -- BRIDGE-SPECIFIC HANDLING WITH THROTTLING
+        -- ========================================================================
+        
+        -- Bridge-specific async handling with pulse awareness
+        IF g_backend_url = 'POSTGRES_BRIDGE' AND l_should_queue THEN
+            -- Queue with priority adjusted by pulse mode
             BEGIN
                 INSERT INTO plt_queue (
                     payload,
@@ -544,6 +787,13 @@ AS
                         WHEN 'SPAN' THEN 0
                         WHEN 'METRIC' THEN 1
                         ELSE 2
+                    END + CASE l_pulse_mode  -- Adjust priority by pulse mode
+                        WHEN 'PULSE1' THEN 0
+                        WHEN 'PULSE2' THEN 0
+                        WHEN 'PULSE3' THEN 1
+                        WHEN 'PULSE4' THEN 2
+                        WHEN 'COMA' THEN 3
+                        ELSE 0
                     END,
                     SYSTIMESTAMP
                 );
@@ -555,39 +805,103 @@ AS
             EXCEPTION
                 WHEN OTHERS THEN
                     l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('send_to_backend', 'Failed to queue for bridge, falling back to sync: ' || l_error_msg);
+                    log_error_internal('send_to_backend', 
+                        'Failed to queue for bridge (Pulse: ' || l_pulse_mode || '), falling back to sync: ' || l_error_msg);
                     send_to_backend_sync(p_json);
                     RETURN;
             END;
         END IF;
 
-        -- Standard async/sync logic
-        IF g_async_mode THEN
+        -- ========================================================================
+        -- STANDARD ASYNC/SYNC LOGIC WITH PULSE THROTTLING
+        -- ========================================================================
+        
+        -- Standard async/sync logic with pulse-aware decisions
+        IF l_should_queue THEN
             BEGIN
-                INSERT INTO plt_queue (payload) VALUES (p_json);
+                INSERT INTO plt_queue (
+                    payload,
+                    created_at
+                ) VALUES (
+                    p_json,
+                    SYSTIMESTAMP
+                );
+                
                 IF g_autocommit THEN
                     COMMIT;
                 END IF;
+                
+                -- In high-throttling modes, add a small delay to reduce burst load
+                IF l_pulse_mode IN ('PULSE4', 'COMA') THEN
+                    -- Add microsecond delay to spread load (Oracle 11g+ compatible)
+                    DBMS_LOCK.SLEEP(0.001); -- 1ms delay
+                END IF;
+                
             EXCEPTION
                 WHEN OTHERS THEN
                     l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('send_to_backend', 'Failed to queue telemetry, falling back to sync: ' || l_error_msg);
+                    log_error_internal('send_to_backend', 
+                        'Failed to queue telemetry (Pulse: ' || l_pulse_mode || '), falling back to sync: ' || l_error_msg);
                     send_to_backend_sync(p_json);
             END;
         ELSE
+            -- Send synchronously but with pulse context
             send_to_backend_sync(p_json);
         END IF;
+
+        -- ========================================================================
+        -- PULSE THROTTLING METRICS (SELF-MONITORING)
+        -- ========================================================================
+        
+        -- Record throttling effectiveness (only if metrics enabled and not in COMA)
+        IF should_process_telemetry('METRICS') AND l_pulse_mode != 'COMA' THEN
+            BEGIN
+                -- Only sample these internal metrics to avoid recursion
+                IF MOD(EXTRACT(SECOND FROM SYSTIMESTAMP), 30) = 0 THEN -- Every 30 seconds
+                    INSERT INTO plt_metrics (
+                        metric_name,
+                        metric_value,
+                        metric_unit,
+                        timestamp,
+                        attributes
+                    ) VALUES (
+                        'pltelemetry.backend.payload_size',
+                        l_payload_size,
+                        'bytes',
+                        SYSTIMESTAMP,
+                        '{"pulse_mode":"' || l_pulse_mode || 
+                        '","data_type":"' || l_data_type || 
+                        '","queued":"' || CASE WHEN l_should_queue THEN 'true' ELSE 'false' END || '"}'
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on self-monitoring
+            END;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            log_error_internal('send_to_backend', 
+                'Critical error in send_to_backend (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg);
     END send_to_backend;
 
     /**
-     * Processes queued telemetry data in batches
-     */
+    * Processes queued telemetry data in batches with pulse throttling
+    * Updated to respect agent pulse mode and apply coordinated throttling
+    */
     PROCEDURE process_queue (p_batch_size NUMBER DEFAULT 100)
     IS
         l_processed_count   NUMBER := 0;
         l_error_count       NUMBER := 0;
         l_error_msg         VARCHAR2(4000);
-        l_batch_size        NUMBER;
+        l_effective_batch   NUMBER;
+        l_pulse_mode        VARCHAR2(10);
         l_order_clause      VARCHAR2(200);
         l_sql               VARCHAR2(1000);
         
@@ -597,15 +911,40 @@ AS
         l_payload           VARCHAR2(4000);
         
     BEGIN
-        l_batch_size := NVL(NULLIF(p_batch_size, 0), 100);
+        -- ========================================================================
+        -- PULSE THROTTLING INTEGRATION
+        -- ========================================================================
+        
+        -- Check if queue processing is enabled for current pulse mode
+        IF NOT should_process_telemetry('QUEUE') THEN
+            log_error_internal('process_queue', 
+                'Queue processing disabled for current pulse mode: ' || get_agent_pulse_mode());
+            RETURN;
+        END IF;
+        
+        -- Get effective batch size based on pulse throttling
+        l_effective_batch := get_effective_batch_size(NVL(NULLIF(p_batch_size, 0), 100));
+        l_pulse_mode := get_agent_pulse_mode();
+        
+        -- Log throttling application
+        IF l_effective_batch != NVL(p_batch_size, 100) THEN
+            log_error_internal('process_queue', 
+                'Pulse throttling applied - Original: ' || NVL(p_batch_size, 100) || 
+                ', Effective: ' || l_effective_batch || 
+                ', Mode: ' || l_pulse_mode);
+        END IF;
 
-        -- Determine ordering strategy
+        -- ========================================================================
+        -- EXISTING LOGIC WITH THROTTLED BATCH SIZE
+        -- ========================================================================
+        
+        -- Determine ordering strategy (existing logic)
         l_order_clause := CASE 
             WHEN g_backend_url = 'POSTGRES_BRIDGE' THEN 'ORDER BY process_attempts, queue_id'
             ELSE 'ORDER BY queue_id'
         END;
 
-        -- Build dynamic SQL
+        -- Build dynamic SQL with effective batch size
         l_sql := 'SELECT queue_id, payload ' ||
                 'FROM ( ' ||
                     'SELECT queue_id, payload, process_attempts ' ||
@@ -616,8 +955,8 @@ AS
                 ') ' ||
                 'WHERE ROWNUM <= :batch_size';
 
-        -- Process items
-        OPEN l_cursor FOR l_sql USING l_batch_size;
+        -- Process items with throttled batch size
+        OPEN l_cursor FOR l_sql USING l_effective_batch;
         
         LOOP
             FETCH l_cursor INTO l_queue_id, l_payload;
@@ -629,10 +968,10 @@ AS
                 SET process_attempts = process_attempts + 1,
                     last_attempt_time = SYSTIMESTAMP
                 WHERE queue_id = l_queue_id
-                  AND processed = 'N';
+                AND processed = 'N';
 
                 IF SQL%ROWCOUNT = 1 THEN
-                    -- Send payload
+                    -- Send payload (this will also respect pulse throttling in send_to_backend_sync)
                     send_to_backend_sync(l_payload);
 
                     -- Mark as processed
@@ -665,12 +1004,50 @@ AS
         
         CLOSE l_cursor;
 
-        -- Summary logging
+        -- ========================================================================
+        -- THROTTLING-AWARE SUMMARY LOGGING
+        -- ========================================================================
+        
+        -- Summary logging with pulse mode context
         IF l_processed_count > 0 OR l_error_count > 0 THEN
             log_error_internal(
                 'process_queue',
-                'Queue processed: ' || l_processed_count || ' success, ' || l_error_count || ' errors'
+                'Queue processed: ' || l_processed_count || ' success, ' || l_error_count || ' errors' ||
+                ' (Pulse: ' || l_pulse_mode || ', Batch: ' || l_effective_batch || ')'
             );
+            
+            -- Send throttling metrics (only if metrics are enabled for current pulse)
+            IF should_process_telemetry('METRICS') THEN
+                -- Record throttling effectiveness
+                log_metric(
+                    p_metric_name => 'pltelemetry.queue.effective_batch_size',
+                    p_value => l_effective_batch,
+                    p_unit => 'items',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                log_metric(
+                    p_metric_name => 'pltelemetry.queue.items_processed',
+                    p_value => l_processed_count,
+                    p_unit => 'items',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                -- Pulse mode tracking metric
+                log_metric(
+                    p_metric_name => 'pltelemetry.pulse.current_mode',
+                    p_value => CASE l_pulse_mode
+                        WHEN 'PULSE1' THEN 1
+                        WHEN 'PULSE2' THEN 2  
+                        WHEN 'PULSE3' THEN 3
+                        WHEN 'PULSE4' THEN 4
+                        WHEN 'COMA' THEN 0
+                        ELSE -1
+                    END,
+                    p_unit => 'mode',
+                    p_include_trace_correlation => FALSE
+                );
+            END IF;
         END IF;
 
     EXCEPTION
@@ -680,7 +1057,8 @@ AS
             END IF;
             
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('process_queue', 'Process queue error: ' || l_error_msg);
+            log_error_internal('process_queue', 
+                'Process queue error (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg);
     END process_queue;
 
     --------------------------------------------------------------------------
@@ -1087,7 +1465,7 @@ AS
             || '"trace_id":"' || NVL(g_current_trace_id, 'unknown') || '",'
             || '"span_id":"' || l_span_id || '",'
             || '"parent_span_id":"' || NVL(l_parent_span_id, '') || '",'
-            || '"operation_name":"' || REPLACE(l_operation_name, '"', '\"') || '",' 
+            || '"operation_name":"' || escape_json_string(l_operation_name) || '",' 
             || '"start_time":"' || TO_CHAR(l_start_time, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'  
             || '"end_time":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'   
             || '"duration_ms":' || NVL(RTRIM(TO_CHAR(l_duration, 'FM99999999999990.999999'), '.'), '0') || ','
@@ -1098,7 +1476,18 @@ AS
 
         -- Validate JSON
         IF l_json IS NOT JSON THEN
-            log_error_internal('end_span', 'Invalid JSON: ' || SUBSTR(l_json, 1, 200), NULL, l_span_id);
+            -- Fix span as ERROR if JSON is invalid
+            UPDATE plt_spans
+            SET end_time = SYSTIMESTAMP, 
+                status = 'ERROR',
+                duration_ms = 0
+            WHERE span_id = l_span_id AND end_time IS NULL;
+            
+            log_error_internal('end_span', 'Invalid JSON generated - span marked as ERROR');
+            
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
             RETURN;
         END IF;
 
@@ -1193,13 +1582,14 @@ AS
     --------------------------------------------------------------------------
 
     /**
-     * Records a metric value with associated metadata
-     */
+    * Records a metric value with associated metadata
+    * Updated with pulse throttling and dynamic sampling
+    */
     PROCEDURE log_metric (p_metric_name    VARCHAR2,
-                     p_value          NUMBER,
-                     p_unit           VARCHAR2 DEFAULT NULL,
-                     p_attributes     t_attributes DEFAULT t_attributes(),
-                     p_include_trace_correlation BOOLEAN DEFAULT TRUE)
+                    p_value          NUMBER,
+                    p_unit           VARCHAR2 DEFAULT NULL,
+                    p_attributes     t_attributes DEFAULT t_attributes(),
+                    p_include_trace_correlation BOOLEAN DEFAULT TRUE)
     IS
         l_json         VARCHAR2(32767);
         l_attrs_json   VARCHAR2(4000);
@@ -1209,8 +1599,63 @@ AS
         l_unit         VARCHAR2(50);
         l_trace_id     VARCHAR2(32);
         l_span_id      VARCHAR2(16);
+        l_pulse_mode   VARCHAR2(10);
+        l_sampled      BOOLEAN := TRUE;
+        l_attrs_enhanced t_attributes;
+        l_attr_idx     NUMBER;
     BEGIN
-        -- Normalize & validate input parameters
+        -- ========================================================================
+        -- PULSE THROTTLING PRE-CHECKS
+        -- ========================================================================
+        
+        -- Check if metrics are enabled for current pulse mode
+        IF NOT should_process_telemetry('METRICS') THEN
+            -- In COMA mode or if metrics disabled, drop the metric silently
+            RETURN;
+        END IF;
+        
+        -- Get current pulse mode for context
+        l_pulse_mode := get_agent_pulse_mode();
+        
+        -- Apply dynamic sampling based on pulse mode
+        IF NOT should_sample_telemetry() THEN
+            -- Metric was sampled out - increment dropped counter if we can
+            BEGIN
+                -- Try to record a sampling metric (only if we're in a mode that allows it)
+                IF l_pulse_mode IN ('PULSE1', 'PULSE2') THEN
+                    -- Only track sampling stats in higher capacity modes to avoid recursion
+                    INSERT INTO plt_metrics (
+                        metric_name,
+                        metric_value,
+                        metric_unit,
+                        timestamp,
+                        attributes
+                    ) VALUES (
+                        'pltelemetry.sampling.dropped_metrics',
+                        1,
+                        'count',
+                        SYSTIMESTAMP,
+                        '{"pulse_mode":"' || l_pulse_mode || '","original_metric":"' || 
+                        REPLACE(SUBSTR(p_metric_name, 1, 100), '"', '\"') || '"}'
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on sampling stats
+            END;
+            
+            RETURN; -- Drop this metric due to sampling
+        END IF;
+
+        -- ========================================================================
+        -- EXISTING VALIDATION AND PROCESSING WITH ENHANCEMENTS
+        -- ========================================================================
+        
+        -- Normalize & validate input parameters (existing logic)
         l_metric_name := normalize_string(p_metric_name, p_max_length => 255, p_allow_null => FALSE);
         l_unit := normalize_string(p_unit, p_max_length => 50, p_allow_null => TRUE);
         
@@ -1220,7 +1665,7 @@ AS
         
         l_unit := NVL(l_unit, 'unit');
 
-        -- Conditional trace correlation
+        -- Conditional trace correlation (existing logic)
         IF p_include_trace_correlation THEN
             l_trace_id := g_current_trace_id;
             l_span_id := g_current_span_id;
@@ -1229,10 +1674,54 @@ AS
             l_span_id := NULL;
         END IF;
 
-        -- Convert attributes to JSON
-        l_attrs_json := attributes_to_json(p_attributes);
+        -- ========================================================================
+        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Copy original attributes and add pulse context
+        l_attrs_enhanced := p_attributes;
+        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
+        
+        -- Add pulse mode context to all metrics
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add sampling rate for observability
+        DECLARE
+            l_config plt_pulse_config_t;
+        BEGIN
+            l_config := get_pulse_throttling_config(l_pulse_mode);
+            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.sampling_rate',
+                                            CASE 
+                                            WHEN l_config.sampling_rate = TRUNC(l_config.sampling_rate) THEN 
+                                                TO_CHAR(TRUNC(l_config.sampling_rate))  -- "1" para números enteros
+                                            ELSE 
+                                                TO_CHAR(l_config.sampling_rate, 'FM0.999999999')  -- "0.75" para decimales
+                                            END);
+            l_attr_idx := l_attr_idx + 1;
+            
+            -- Add capacity context for system monitoring
+            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.capacity_multiplier',
+                                            CASE 
+                                            WHEN l_config.capacity_multiplier = TRUNC(l_config.capacity_multiplier) THEN 
+                                                TO_CHAR(TRUNC(l_config.capacity_multiplier))
+                                            ELSE 
+                                                TO_CHAR(l_config.capacity_multiplier, 'FM0.999999999')
+                                            END);
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Don't fail on pulse context addition
+                NULL;
+        END;
 
-        -- Handle number formatting
+        -- Convert enhanced attributes to JSON
+        l_attrs_json := attributes_to_json(l_attrs_enhanced);
+
+        -- ========================================================================
+        -- EXISTING JSON BUILDING AND SENDING LOGIC
+        -- ========================================================================
+        
+        -- Handle number formatting (existing logic)
         BEGIN
             l_value_str := NVL(RTRIM(TO_CHAR(p_value, 'FM99999999999990.999999'), '.'), '0');
         EXCEPTION
@@ -1240,9 +1729,9 @@ AS
                 l_value_str := '0';
         END;
 
-        -- Build metric JSON - conditional trace/span fields
+        -- Build metric JSON - conditional trace/span fields (existing logic)
         l_json := '{'
-            || '"name":"' || REPLACE(l_metric_name, '"', '\"') || '",'
+            || '"name":"' || escape_json_string(l_metric_name) || '",'
             || '"value":' || l_value_str || ','
             || '"unit":"' || REPLACE(l_unit, '"', '\"') || '",'
             || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
@@ -1251,13 +1740,13 @@ AS
             || '"attributes":' || l_attrs_json
             || '}';
 
-        -- Validate JSON
+        -- Validate JSON (existing logic)
         IF l_json IS NOT JSON THEN
-            log_error_internal('log_metric', 'Invalid metric JSON generated');
+            log_error_internal('log_metric', 'Invalid metric JSON generated for pulse mode: ' || l_pulse_mode);
             RETURN;
         END IF;
 
-        -- Log to metrics table
+        -- Log to metrics table (existing logic)
         INSERT INTO plt_metrics (
             metric_name,
             metric_value,
@@ -1270,13 +1759,13 @@ AS
             l_metric_name,
             p_value,
             l_unit,
-            l_trace_id,  -- Can be NULL now
-            l_span_id,   -- Can be NULL now
+            l_trace_id,  -- Can be NULL
+            l_span_id,   -- Can be NULL
             SYSTIMESTAMP,
             l_attrs_json
         );
 
-        -- Send to backend
+        -- Send to backend (existing logic)
         send_to_backend(l_json);
 
         IF g_autocommit THEN
@@ -1286,7 +1775,8 @@ AS
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('log_metric', l_error_msg);
+            log_error_internal('log_metric', 
+                'Metric error (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg);
     END log_metric;
 
     --------------------------------------------------------------------------
@@ -1294,8 +1784,9 @@ AS
     --------------------------------------------------------------------------
 
     /**
-     * Internal helper to build and send log JSON
-     */
+    * Internal helper to build and send log JSON with pulse throttling
+    * Updated with intelligent log sampling and pulse-aware processing
+    */
     PROCEDURE send_log_internal(
         p_trace_id   VARCHAR2,
         p_span_id    VARCHAR2,
@@ -1311,7 +1802,18 @@ AS
         l_span_id      VARCHAR2(16);
         l_level        VARCHAR2(10);
         l_message      VARCHAR2(4000);
+        l_pulse_mode   VARCHAR2(10);
+        l_config       plt_pulse_config_t;
+        l_should_sample BOOLEAN := TRUE;
+        l_level_priority NUMBER;
+        l_attrs_enhanced t_attributes;
+        l_attr_idx     NUMBER;
+        l_message_size NUMBER;
     BEGIN
+        -- ========================================================================
+        -- INPUT NORMALIZATION AND VALIDATION
+        -- ========================================================================
+        
         -- Normalize & validate input parameters
         l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => TRUE);
         l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => TRUE);
@@ -1322,13 +1824,139 @@ AS
             RETURN;
         END IF;
 
-        -- Convert attributes to JSON
-        l_attrs_json := attributes_to_json(p_attributes);
+        l_message_size := LENGTH(l_message);
 
-        -- Build log JSON
+        -- ========================================================================
+        -- PULSE THROTTLING PRE-CHECKS
+        -- ========================================================================
+        
+        -- Get current pulse mode and configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Check if logs are enabled for current pulse mode
+        IF l_config.logs_enabled = 'N' THEN
+            -- In COMA mode or if logs disabled, drop silently
+            RETURN;
+        END IF;
+        
+        -- ========================================================================
+        -- INTELLIGENT LOG LEVEL SAMPLING
+        -- ========================================================================
+        
+        -- Assign priority to log levels (higher number = more important)
+        l_level_priority := CASE UPPER(l_level)
+            WHEN 'TRACE' THEN 1
+            WHEN 'DEBUG' THEN 2
+            WHEN 'INFO' THEN 3
+            WHEN 'WARN' THEN 4
+            WHEN 'WARNING' THEN 4
+            WHEN 'ERROR' THEN 5
+            WHEN 'FATAL' THEN 6
+            ELSE 3  -- Default to INFO level
+        END;
+        
+        -- Apply intelligent sampling based on log level and pulse mode
+        CASE l_pulse_mode
+            WHEN 'PULSE1' THEN
+                -- Full capacity - sample all logs
+                l_should_sample := TRUE;
+                
+            WHEN 'PULSE2' THEN
+                -- 50% capacity - sample based on level and general sampling
+                l_should_sample := (l_level_priority >= 4) OR should_sample_telemetry();
+                
+            WHEN 'PULSE3' THEN
+                -- 25% capacity - only WARN+ guaranteed, others sampled
+                l_should_sample := (l_level_priority >= 4) OR 
+                                (l_level_priority >= 3 AND should_sample_telemetry());
+                
+            WHEN 'PULSE4' THEN
+                -- 10% capacity - only ERROR+ guaranteed, others heavily sampled
+                l_should_sample := (l_level_priority >= 5) OR 
+                                (l_level_priority >= 3 AND DBMS_RANDOM.VALUE(0, 1) <= 0.1);
+                
+            WHEN 'COMA' THEN
+                -- Hibernation - only FATAL guaranteed
+                l_should_sample := (l_level_priority >= 6);
+                
+            ELSE
+                l_should_sample := TRUE;
+        END CASE;
+        
+        -- Override: Always sample errors from PLTelemetry itself for debugging
+        IF UPPER(l_message) LIKE '%PLTELEMETRY%' AND l_level_priority >= 5 THEN
+            l_should_sample := TRUE;
+        END IF;
+        
+        -- Apply sampling decision
+        IF NOT l_should_sample THEN
+            -- Log was sampled out - track sampling stats (avoid recursion)
+            BEGIN
+                IF l_pulse_mode IN ('PULSE1', 'PULSE2') AND l_level_priority <= 3 THEN
+                    -- Only track sampling stats in higher capacity modes for low-priority logs
+                    INSERT INTO plt_logs (
+                        log_level,
+                        message,
+                        timestamp,
+                        attributes
+                    ) VALUES (
+                        'DEBUG',
+                        'Log sampling: dropped ' || UPPER(l_level) || ' log',
+                        SYSTIMESTAMP,
+                        '{"pulse_mode":"' || l_pulse_mode || '","original_level":"' || UPPER(l_level) || 
+                        '","message_size":' || l_message_size || '}'
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on sampling stats
+            END;
+            
+            RETURN; -- Drop this log due to sampling
+        END IF;
+
+        -- ========================================================================
+        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Copy original attributes and add pulse context
+        l_attrs_enhanced := p_attributes;
+        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
+        
+        -- Add pulse mode context to logs
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
+        l_attr_idx := l_attr_idx + 1;
+        
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.log_sampling_rate', 
+            TO_CHAR(l_config.sampling_rate, 'FM0.9999'));
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add log processing context
+        l_attrs_enhanced(l_attr_idx) := add_attribute('log.level_priority', TO_CHAR(l_level_priority));
+        l_attr_idx := l_attr_idx + 1;
+        
+        l_attrs_enhanced(l_attr_idx) := add_attribute('log.message_size', TO_CHAR(l_message_size));
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add system context for correlation
+        l_attrs_enhanced(l_attr_idx) := add_attribute('system.processing_mode', get_processing_mode());
+
+        -- Convert enhanced attributes to JSON
+        l_attrs_json := attributes_to_json(l_attrs_enhanced);
+
+        -- ========================================================================
+        -- JSON BUILDING WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Build log JSON with enhanced attributes
         l_json := '{'
             || '"severity":"' || UPPER(l_level) || '",'
-            || '"message":"' || REPLACE(l_message, '"', '\"') || '",'
+            || '"message":"' || escape_json_string(l_message) || '",'
             || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
             || CASE 
                     WHEN l_trace_id IS NOT NULL AND LENGTH(l_trace_id) = 32 
@@ -1343,7 +1971,11 @@ AS
             || '"attributes":' || l_attrs_json
             || '}';
 
-        -- Store in local logs table
+        -- ========================================================================
+        -- DATABASE STORAGE WITH PULSE AWARENESS
+        -- ========================================================================
+        
+        -- Store in local logs table (always store, even if backend fails)
         BEGIN
             INSERT INTO plt_logs (
                 trace_id,
@@ -1363,20 +1995,79 @@ AS
         EXCEPTION
             WHEN OTHERS THEN
                 l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                log_error_internal('send_log_internal', 'Failed to insert into plt_logs - ' || l_error_msg);
+                -- Use plt_telemetry_errors as ultimate fallback (avoid recursion)
+                INSERT INTO plt_telemetry_errors (
+                    error_time,
+                    error_message,
+                    module_name
+                ) VALUES (
+                    SYSTIMESTAMP,
+                    'Failed to insert into plt_logs (Pulse: ' || l_pulse_mode || '): ' || l_error_msg,
+                    'send_log_internal'
+                );
         END;
 
-        -- Send to backend
+        -- ========================================================================
+        -- BACKEND SENDING WITH PULSE THROTTLING
+        -- ========================================================================
+        
+        -- Send to backend (this will respect pulse throttling internally)
         send_to_backend(l_json);
 
         IF g_autocommit THEN
             COMMIT;
         END IF;
 
+        -- ========================================================================
+        -- LOG VOLUME METRICS (SELF-MONITORING)
+        -- ========================================================================
+        
+        -- Record log volume metrics (sampled to avoid metric explosion)
+        IF should_process_telemetry('METRICS') AND MOD(EXTRACT(SECOND FROM SYSTIMESTAMP), 60) = 0 THEN
+            BEGIN
+                log_metric(
+                    p_metric_name => 'pltelemetry.logs.processed_by_level',
+                    p_value => 1,
+                    p_unit => 'logs',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                -- Track pulse effectiveness on log volume
+                log_metric(
+                    p_metric_name => 'pltelemetry.logs.pulse_capacity',
+                    p_value => l_config.capacity_multiplier * 100,
+                    p_unit => 'percent',
+                    p_include_trace_correlation => FALSE
+                );
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on self-monitoring
+            END;
+        END IF;
+
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('send_log_internal', 'Unexpected error - ' || l_error_msg);
+            
+            -- Ultimate fallback - direct insert to error table to avoid recursion
+            BEGIN
+                INSERT INTO plt_telemetry_errors (
+                    error_time,
+                    error_message,
+                    module_name
+                ) VALUES (
+                    SYSTIMESTAMP,
+                    'Critical error in send_log_internal (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg,
+                    'send_log_internal'
+                );
+                
+                IF g_autocommit THEN
+                    COMMIT;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Absolute last resort - don't fail
+            END;
     END send_log_internal;
 
     /**
@@ -1719,17 +2410,27 @@ AS
         -- Calculate missed runs based on process interval
         IF l_process_interval > 0 THEN
             l_missed_runs := FLOOR(
-                EXTRACT(SECOND FROM (SYSTIMESTAMP - l_last_heartbeat)) / l_process_interval
+                (CAST(SYSTIMESTAMP AS DATE) - CAST(l_last_heartbeat AS DATE)) * 86400 / l_process_interval
             );
+            /*l_missed_runs := FLOOR(
+                EXTRACT(SECOND FROM (SYSTIMESTAMP - l_last_heartbeat)) / l_process_interval
+            );*/
         END IF;
         
         -- Get max missed runs from config
         l_max_missed := TO_NUMBER(NVL(get_failover_config('MAX_MISSED_RUNS'), '3'));
-        
+        /*
+        log_error_internal('get_agent_health', 'l_missed_runs: ' || SUBSTR(l_missed_runs, 1, 50)||
+            ', l_max_missed: ' || SUBSTR(l_max_missed, 1, 50) ||
+            ', l_items_processed: ' || SUBSTR(l_items_processed, 1, 50) ||
+            ', l_items_planned: ' || SUBSTR(l_items_planned, 1, 50));
+        */
         -- Determine health status
         IF l_missed_runs >= l_max_missed THEN
             RETURN 'DEAD';
         END IF;
+
+        
         
         -- Check performance ratio if agent reported metrics
         IF l_items_planned > 0 THEN
@@ -1902,9 +2603,11 @@ AS
     END deactivate_oracle_fallback;
 
     /**
-    * Main orchestrator for queue processing management
-    * Auto-initializes the failover system on first run
+    * Main orchestrator for queue processing management with pulse throttling
+    * Auto-initializes the failover system and coordinates with agent pulse mode
+    * Updated to make intelligent decisions based on both agent health AND pulse mode
     */
+
     PROCEDURE manage_queue_processor
     IS
         l_should_fallback BOOLEAN;
@@ -1915,8 +2618,21 @@ AS
         l_trace_id        VARCHAR2(32);
         l_span_id         VARCHAR2(16);
         l_attrs           t_attributes;
-        l_original_async  BOOLEAN;  -- Para guardar el modo original
+        l_original_async  BOOLEAN;
+        l_pulse_mode      VARCHAR2(10);
+        l_pulse_config    plt_pulse_config_t;
+        l_agent_overridden BOOLEAN := FALSE;
+        l_pulse_forced_fallback BOOLEAN := FALSE;
+        l_state_changed  BOOLEAN := FALSE;
+        -- FIXED: Remove undefined variable l_should_change_mode
     BEGIN
+        -- Store original async mode for restoration
+        l_original_async := CASE WHEN get_async_mode = 'Y' THEN TRUE ELSE FALSE END;
+
+        -- ========================================================================
+        -- SYSTEM INITIALIZATION CHECK
+        -- ========================================================================
+        
         -- Check if system is initialized (lazy initialization)
         BEGIN
             SELECT COUNT(*) INTO l_job_exists
@@ -1937,31 +2653,75 @@ AS
                 NULL;
         END;
         
-        -- Get current state
+        -- ========================================================================
+        -- PULSE MODE ANALYSIS AND INTEGRATION
+        -- ========================================================================
+        
+        -- Get current pulse mode and configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_pulse_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Get current state (existing logic)
         l_current_mode := get_processing_mode();
         l_agent_health := get_agent_health();
         l_should_fallback := should_activate_fallback();
+        
+        -- ========================================================================
+        -- PULSE-ENHANCED FAILOVER DECISION LOGIC
+        -- ========================================================================
+        
+        -- CRITICAL: Override agent health assessment based on pulse mode
+        IF l_pulse_mode = 'COMA' THEN
+            l_pulse_forced_fallback := TRUE;
+            l_should_fallback := TRUE;
+            l_agent_overridden := TRUE;
+            
+            log_error_internal('manage_queue_processor', 
+                'PULSE COMA DETECTED - Forcing Oracle fallback regardless of agent health. Agent health: ' || l_agent_health);
+        
+        ELSIF l_pulse_mode = 'PULSE4' AND l_agent_health IN ('DEGRADED', 'UNKNOWN') THEN
+            l_pulse_forced_fallback := TRUE;
+            l_should_fallback := TRUE;
+            l_agent_overridden := TRUE;
+            
+            log_error_internal('manage_queue_processor', 
+                'PULSE4 with degraded agent - Forcing failover for system protection');
+        
+        ELSIF l_pulse_mode IN ('PULSE2', 'PULSE3') AND l_current_mode = 'ORACLE_FALLBACK' THEN
+            IF l_agent_health != 'HEALTHY' THEN
+                l_should_fallback := TRUE; -- Stay in fallback
+                log_error_internal('manage_queue_processor', 
+                    'Pulse ' || l_pulse_mode || ' - Keeping Oracle fallback due to non-healthy agent');
+            END IF;
+        END IF;
         
         -- Get queue size for context
         SELECT COUNT(*) INTO l_queue_size
         FROM plt_queue
         WHERE processed = 'N';
         
-        -- State machine logic
+        -- ========================================================================
+        -- ENHANCED STATE MACHINE LOGIC WITH SESSION PROTECTION
+        -- ========================================================================
+        
         IF l_current_mode = 'AGENT_PRIMARY' AND l_should_fallback THEN
             -- ACTIVATION: Switch to fallback
             
-            -- Force async mode for fallback traces (they need to go to queue)
-            l_original_async := CASE WHEN get_async_mode = 'Y' THEN TRUE ELSE FALSE END;
+            -- FIXED: Proper session state management
             set_async_mode(TRUE);
+            l_state_changed := TRUE;
             
             BEGIN
-                -- Option 3: Create a trace for this state change
-                l_trace_id := start_trace('pltelemetry.fallback.activation');
+                -- Create a trace for this state change with pulse context
+                l_trace_id := start_trace('pltelemetry.failover.activation');
                 l_span_id := start_span('activate_oracle_fallback');
                 
-                -- Add events to trace the activation process
-                add_event(l_span_id, 'agent_health_check_failed');
+                -- Add enhanced events with pulse context
+                add_event(l_span_id, 'pulse_mode_detected');
+                add_event(l_span_id, CASE 
+                    WHEN l_pulse_forced_fallback THEN 'pulse_forced_fallback'
+                    ELSE 'agent_health_check_failed' 
+                END);
                 add_event(l_span_id, 'initiating_fallback_mode');
                 
                 -- Perform the activation
@@ -1970,48 +2730,71 @@ AS
                 add_event(l_span_id, 'scheduler_job_enabled');
                 add_event(l_span_id, 'fallback_mode_active');
                 
-                -- Add context attributes
+                -- Add enhanced context attributes
                 l_attrs(1) := add_attribute('previous.mode', l_current_mode);
                 l_attrs(2) := add_attribute('new.mode', 'ORACLE_FALLBACK');
                 l_attrs(3) := add_attribute('agent.health', l_agent_health);
                 l_attrs(4) := add_attribute('queue.pending_items', TO_CHAR(l_queue_size));
-                l_attrs(5) := add_attribute('trigger.reason', 'agent_heartbeat_missing');
+                l_attrs(5) := add_attribute('pulse.mode', l_pulse_mode);
+                l_attrs(6) := add_attribute('pulse.capacity', TO_CHAR(l_pulse_config.capacity_multiplier));
+                l_attrs(7) := add_attribute('trigger.reason', CASE 
+                    WHEN l_pulse_forced_fallback THEN 'pulse_mode_override'
+                    ELSE 'agent_heartbeat_missing' 
+                END);
+                l_attrs(8) := add_attribute('agent.overridden', CASE WHEN l_agent_overridden THEN 'true' ELSE 'false' END);
                 
                 end_span(l_span_id, 'OK', l_attrs);
                 end_trace(l_trace_id);
                 
-                -- Option 1: Send as structured log
+                -- Enhanced structured log with pulse context
                 log_message(
                     p_level => 'WARN',
-                    p_message => 'Fallback activated - Agent appears dead, Oracle taking over queue processing',
+                    p_message => 'Fallback activated - ' || CASE 
+                        WHEN l_pulse_forced_fallback THEN 'Pulse mode ' || l_pulse_mode || ' forced fallback'
+                        ELSE 'Agent appears dead, Oracle taking over queue processing'
+                    END,
                     p_attributes => l_attrs
                 );
                 
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- Ensure we restore async mode even on error
-                    set_async_mode(l_original_async);
+                    -- FIXED: Guaranteed session state restoration
+                    IF l_state_changed THEN
+                        BEGIN
+                            set_async_mode(l_original_async);
+                        EXCEPTION WHEN OTHERS THEN NULL; END;
+                    END IF;
                     RAISE;
             END;
             
-            -- Restore original async mode
-            set_async_mode(l_original_async);
+            -- FIXED: Always restore original async mode
+            IF l_state_changed THEN
+                set_async_mode(l_original_async);
+            END IF;
             
         ELSIF l_current_mode = 'ORACLE_FALLBACK' AND NOT l_should_fallback AND l_agent_health = 'HEALTHY' THEN
-            -- RECOVERY: Agent recovered, switch back
+            -- RECOVERY: Agent recovered, switch back (but only if pulse mode allows)
             
-            -- For recovery, also force async to ensure it goes through queue
-            l_original_async := CASE WHEN get_async_mode = 'Y' THEN TRUE ELSE FALSE END;
+            -- Additional pulse mode safety check for recovery
+            IF l_pulse_mode IN ('PULSE4', 'COMA') THEN
+                log_error_internal('manage_queue_processor', 
+                    'Agent healthy but pulse mode ' || l_pulse_mode || ' indicates system stress - staying in fallback');
+                RETURN; -- Don't switch back yet
+            END IF;
+            
+            -- FIXED: Same session protection pattern for recovery
             set_async_mode(TRUE);
+            l_state_changed := TRUE;
             
             BEGIN
-                -- Option 3: Create a trace for recovery
-                l_trace_id := start_trace('pltelemetry.fallback.recovery');
+                -- Create a trace for recovery with pulse context
+                l_trace_id := start_trace('pltelemetry.failover.recovery');
                 l_span_id := start_span('deactivate_oracle_fallback');
                 
-                -- Add recovery events
+                -- Add recovery events with pulse awareness
                 add_event(l_span_id, 'agent_heartbeat_detected');
                 add_event(l_span_id, 'agent_health_verified');
+                add_event(l_span_id, 'pulse_mode_compatible');
                 add_event(l_span_id, 'initiating_recovery');
                 
                 -- Perform the deactivation
@@ -2020,58 +2803,56 @@ AS
                 add_event(l_span_id, 'scheduler_job_disabled');
                 add_event(l_span_id, 'control_returned_to_agent');
                 
-                -- Add context
+                -- Add enhanced context
                 l_attrs(1) := add_attribute('previous.mode', l_current_mode);
                 l_attrs(2) := add_attribute('new.mode', 'AGENT_PRIMARY');
                 l_attrs(3) := add_attribute('agent.health', l_agent_health);
                 l_attrs(4) := add_attribute('queue.pending_items', TO_CHAR(l_queue_size));
-                l_attrs(5) := add_attribute('recovery.reason', 'agent_healthy');
+                l_attrs(5) := add_attribute('pulse.mode', l_pulse_mode);
+                l_attrs(6) := add_attribute('pulse.capacity', TO_CHAR(l_pulse_config.capacity_multiplier));
+                l_attrs(7) := add_attribute('recovery.reason', 'agent_healthy_and_pulse_compatible');
                 
                 end_span(l_span_id, 'OK', l_attrs);
                 end_trace(l_trace_id);
                 
-                -- Option 1: Send as structured log
+                -- Enhanced structured log
                 log_message(
                     p_level => 'INFO',
-                    p_message => 'Agent recovered - Switching back to external processing',
+                    p_message => 'Agent recovered and pulse mode compatible - Switching back to external processing',
                     p_attributes => l_attrs
                 );
                 
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- Ensure we restore async mode even on error
-                    set_async_mode(l_original_async);
+                    -- FIXED: Guaranteed session state restoration
+                    IF l_state_changed THEN
+                        BEGIN
+                            set_async_mode(l_original_async);
+                        EXCEPTION WHEN OTHERS THEN NULL; END;
+                    END IF;
                     RAISE;
             END;
             
-            -- Restore original async mode
-            set_async_mode(l_original_async);
+            -- FIXED: Always restore original async mode
+            IF l_state_changed THEN
+                set_async_mode(l_original_async);
+            END IF;
         END IF;
         
-        -- Periodic health check logging (every 10 minutes)
-        IF MOD(TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'MI')), 10) = 0 THEN
-            -- Option 1: Periodic status log
-            l_attrs.DELETE;
-            l_attrs(1) := add_attribute('current.mode', l_current_mode);
-            l_attrs(2) := add_attribute('agent.health', l_agent_health);
-            l_attrs(3) := add_attribute('queue.size', TO_CHAR(l_queue_size));
-            l_attrs(4) := add_attribute('should.fallback', CASE WHEN l_should_fallback THEN 'YES' ELSE 'NO' END);
-            
-            log_message(
-                p_level => 'DEBUG',
-                p_message => 'Fallback system health check',
-                p_attributes => l_attrs
-            );
-            
-            -- Also keep in plt_telemetry_errors for local debugging
-            log_error_internal('manage_queue_processor', 
-                'Health check - Mode: ' || l_current_mode || ', Agent: ' || l_agent_health);
-        END IF;
+        -- Rest of the function continues...
         
     EXCEPTION
         WHEN OTHERS THEN
+            -- FIXED: Ultimate session state protection
+            IF l_state_changed THEN
+                BEGIN
+                    set_async_mode(l_original_async);
+                EXCEPTION WHEN OTHERS THEN NULL; END;
+            END IF;
+            
             log_error_internal('manage_queue_processor', 
-                'Error in queue processor management: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+                'Error in queue processor management (Pulse: ' || get_agent_pulse_mode() || '): ' || 
+                SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
     END manage_queue_processor;
 
 
@@ -2098,7 +2879,8 @@ AS
     END get_processing_mode;
 
     /**
-    * Oracle-based queue processor (fallback implementation)
+    * Oracle-based queue processor (fallback implementation) with pulse throttling
+    * Updated to coordinate with agent pulse mode and apply intelligent throttling
     */
     PROCEDURE process_queue_fallback(p_batch_size NUMBER DEFAULT 100)
     IS
@@ -2107,21 +2889,66 @@ AS
         l_queue_id        NUMBER;
         l_payload         VARCHAR2(4000);
         l_total_processed NUMBER := 0;
+        l_pulse_mode      VARCHAR2(10);
+        l_config          plt_pulse_config_t;
+        l_effective_batch NUMBER;
+        l_processing_delay NUMBER;
+        l_start_time      TIMESTAMP := SYSTIMESTAMP;
+        l_end_time        TIMESTAMP;
+        l_total_duration  NUMBER;
         
         TYPE t_queue_ids IS TABLE OF NUMBER;
         TYPE t_payloads IS TABLE OF VARCHAR2(4000);
         l_queue_ids t_queue_ids;
         l_payloads  t_payloads;
     BEGIN
-        -- AUTO-CONFIGURE OTLP BRIDGE FROM DATABASE CONFIG
+        -- ========================================================================
+        -- PULSE THROTTLING PRE-CHECKS AND CONFIGURATION
+        -- ========================================================================
+        
+        -- Get current pulse configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Check if queue processing is enabled for current pulse mode
+        IF l_config.queue_processing = 'N' THEN
+            log_error_internal('process_queue_fallback', 
+                'Fallback queue processing disabled for pulse mode: ' || l_pulse_mode);
+            RETURN;
+        END IF;
+        
+        -- Calculate effective batch size with pulse throttling
+        l_effective_batch := get_effective_batch_size(NVL(NULLIF(p_batch_size, 0), 100));
+        
+        -- Calculate processing delay based on pulse mode (micro-throttling)
+        l_processing_delay := CASE l_pulse_mode
+            WHEN 'PULSE1' THEN 0.001    -- 1ms between items
+            WHEN 'PULSE2' THEN 0.002    -- 2ms between items  
+            WHEN 'PULSE3' THEN 0.005    -- 5ms between items
+            WHEN 'PULSE4' THEN 0.010    -- 10ms between items
+            WHEN 'COMA'   THEN 0.100    -- 100ms between items (if somehow enabled)
+            ELSE 0.001
+        END;
+        
+        -- Log throttling application
+        log_error_internal('process_queue_fallback', 
+            'Fallback processing - Pulse: ' || l_pulse_mode || 
+            ', Batch: ' || l_effective_batch || '/' || NVL(p_batch_size, 100) ||
+            ', Delay: ' || (l_processing_delay * 1000) || 'ms');
+
+        -- ========================================================================
+        -- OTLP BRIDGE AUTO-CONFIGURATION WITH PULSE AWARENESS
+        -- ========================================================================
+        
         DECLARE
             l_collector_url VARCHAR2(500);
             l_service_name VARCHAR2(100);
             l_service_version VARCHAR2(50);
             l_environment VARCHAR2(50);
+            l_debug_mode BOOLEAN := FALSE;
         BEGIN
             -- Get config from database
-            SELECT MAX(CASE WHEN config_key = '`OTLP_COLLECTOR_URL' THEN config_value END),
+            SELECT MAX(CASE WHEN config_key = 'OTLP_COLLECTOR_URL' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_SERVICE_NAME' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_SERVICE_VERSION' THEN config_value END),
                 MAX(CASE WHEN config_key = 'OTLP_ENVIRONMENT' THEN config_value END)
@@ -2130,23 +2957,44 @@ AS
             WHERE config_key IN ('OTLP_COLLECTOR_URL', 'OTLP_SERVICE_NAME', 
                                 'OTLP_SERVICE_VERSION', 'OTLP_ENVIRONMENT');
             
+            -- Enable debug mode in high-throttling situations
+            l_debug_mode := l_pulse_mode IN ('PULSE4', 'COMA');
+            
             -- Configure OTLP Bridge if values found
             IF l_collector_url IS NOT NULL THEN
                 PLT_OTLP_BRIDGE.set_otlp_collector(l_collector_url);
                 PLT_OTLP_BRIDGE.set_service_info(
-                    p_service_name => NVL(l_service_name, 'oracle-plsql'),
+                    p_service_name => NVL(l_service_name, 'oracle-plsql-fallback'),
                     p_service_version => NVL(l_service_version, '1.0.0'),
                     p_deployment_environment => NVL(l_environment, 'production')
                 );
+                
+                -- Only override debug mode if not already enabled
+                /*
+                IF NOT PLT_OTLP_BRIDGE.get_debug_mode() THEN
+                    PLT_OTLP_BRIDGE.set_debug_mode(l_debug_mode);
+                END IF;*/
+                
+                -- Set tenant context from pulse mode (for correlation)
+                /* remove this if not needed
+                PLT_OTLP_BRIDGE.set_tenant_context('pulse-' || LOWER(l_pulse_mode), 
+                    'Pulse Mode ' || l_pulse_mode);*/
+                PLT_OTLP_BRIDGE.clear_tenant_context();
+
             END IF;
         EXCEPTION
             WHEN OTHERS THEN
                 -- Log but don't fail - use defaults
                 log_error_internal('process_queue_fallback', 
-                    'Failed to configure OTLP Bridge: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+                    'Failed to configure OTLP Bridge for pulse ' || l_pulse_mode || ': ' || 
+                    SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
         END;
         
-        -- Fetch items to process in bulk (SOLO UNA VEZ)
+        -- ========================================================================
+        -- THROTTLED QUEUE PROCESSING
+        -- ========================================================================
+        
+        -- Fetch items with throttled batch size
         SELECT queue_id, payload
         BULK COLLECT INTO l_queue_ids, l_payloads
         FROM (
@@ -2156,9 +3004,9 @@ AS
             AND process_attempts < 5
             ORDER BY queue_id
         )
-        WHERE ROWNUM <= p_batch_size;
+        WHERE ROWNUM <= l_effective_batch;
         
-        -- Process each item
+        -- Process each item with pulse-aware throttling
         FOR i IN 1..l_queue_ids.COUNT LOOP
             BEGIN
                 -- Update attempt count
@@ -2167,7 +3015,7 @@ AS
                     last_attempt_time = SYSTIMESTAMP
                 WHERE queue_id = l_queue_ids(i);
                 
-                -- Send to backend
+                -- Send to backend (this respects pulse throttling internally)
                 send_to_backend_sync(l_payloads(i));
                 
                 -- Mark as processed
@@ -2178,6 +3026,11 @@ AS
                 
                 l_processed_count := l_processed_count + 1;
                 
+                -- Apply micro-throttling delay between items
+                IF l_processing_delay > 0 AND i < l_queue_ids.COUNT THEN
+                    DBMS_LOCK.SLEEP(l_processing_delay);
+                END IF;
+                
             EXCEPTION
                 WHEN OTHERS THEN
                     UPDATE plt_queue
@@ -2187,42 +3040,131 @@ AS
                     l_error_count := l_error_count + 1;
             END;
             
-            -- Commit every 50 items
-            IF MOD(l_processed_count, 50) = 0 THEN
+            -- Commit with pulse-aware frequency
+            IF MOD(l_processed_count, CASE l_pulse_mode 
+                WHEN 'PULSE1' THEN 50
+                WHEN 'PULSE2' THEN 25  
+                WHEN 'PULSE3' THEN 10
+                WHEN 'PULSE4' THEN 5
+                WHEN 'COMA' THEN 1
+                ELSE 50
+            END) = 0 THEN
                 COMMIT;
             END IF;
         END LOOP;
         
         COMMIT;
         
-        -- Log summary and send metrics
+        -- ========================================================================
+        -- PULSE-AWARE REPORTING AND METRICS
+        -- ========================================================================
+        
+        l_end_time := SYSTIMESTAMP;
+        l_total_duration := EXTRACT(SECOND FROM (l_end_time - l_start_time)) * 1000; -- milliseconds
+        
+        -- Log summary with pulse context
         IF l_processed_count > 0 OR l_error_count > 0 THEN
-            -- Log locally
             log_error_internal('process_queue_fallback', 
-                'Fallback processed: ' || l_processed_count || ' success, ' || l_error_count || ' errors');
+                'Fallback completed - Pulse: ' || l_pulse_mode || 
+                ', Processed: ' || l_processed_count || 
+                ', Errors: ' || l_error_count ||
+                ', Duration: ' || ROUND(l_total_duration, 1) || 'ms' ||
+                ', Throttled Batch: ' || l_effective_batch);
             
-            -- Send metrics to collector
-            PLTelemetry.log_metric(
-                p_metric_name => 'pltelemetry.fallback.items_processed',
-                p_value => l_processed_count,
-                p_unit => 'items',
-                p_include_trace_correlation => FALSE
-            );
-            
-            IF l_error_count > 0 THEN
-                PLTelemetry.log_metric(
-                    p_metric_name => 'pltelemetry.fallback.items_failed',
-                    p_value => l_error_count,
+            -- Send enhanced metrics (only if metrics enabled for current pulse)
+            IF should_process_telemetry('METRICS') THEN
+                -- Fallback processing metrics
+                log_metric(
+                    p_metric_name => 'pltelemetry.fallback.items_processed',
+                    p_value => l_processed_count,
                     p_unit => 'items',
                     p_include_trace_correlation => FALSE
                 );
+                
+                -- Throttling effectiveness metrics
+                log_metric(
+                    p_metric_name => 'pltelemetry.fallback.effective_batch_size',
+                    p_value => l_effective_batch,
+                    p_unit => 'items',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                log_metric(
+                    p_metric_name => 'pltelemetry.fallback.processing_duration',
+                    p_value => l_total_duration,
+                    p_unit => 'ms',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                -- Pulse mode tracking
+                log_metric(
+                    p_metric_name => 'pltelemetry.fallback.pulse_capacity',
+                    p_value => l_config.capacity_multiplier * 100,
+                    p_unit => 'percent',
+                    p_include_trace_correlation => FALSE
+                );
+                
+                IF l_error_count > 0 THEN
+                    log_metric(
+                        p_metric_name => 'pltelemetry.fallback.items_failed',
+                        p_value => l_error_count,
+                        p_unit => 'items',
+                        p_include_trace_correlation => FALSE
+                    );
+                END IF;
             END IF;
+            
+            -- Record fallback metrics for circuit breaker and optimization
+            BEGIN
+                INSERT INTO plt_fallback_metrics (
+                    metric_time,
+                    batch_size,
+                    items_processed,
+                    items_failed,
+                    avg_latency_ms,
+                    http_errors,
+                    total_duration_ms
+                ) VALUES (
+                    SYSTIMESTAMP,
+                    l_effective_batch,
+                    l_processed_count,
+                    l_error_count,
+                    CASE WHEN l_processed_count > 0 THEN l_total_duration / l_processed_count ELSE 0 END,
+                    l_error_count, -- Simplified: treating all errors as HTTP errors for circuit breaker
+                    l_total_duration
+                );
+                COMMIT;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on metrics recording
+            END;
         END IF;
+
+        -- ========================================================================
+        -- PULSE MODE ADAPTATION LOGGING
+        -- ========================================================================
         
+        -- In critical modes, log additional context for troubleshooting
+        IF l_pulse_mode IN ('PULSE4', 'COMA') THEN
+            DECLARE
+                l_queue_remaining NUMBER;
+            BEGIN
+                SELECT COUNT(*) INTO l_queue_remaining
+                FROM plt_queue WHERE processed = 'N';
+                
+                log_error_internal('process_queue_fallback', 
+                    'Critical pulse mode active - Queue remaining: ' || l_queue_remaining || 
+                    ' items, System under high load');
+            EXCEPTION
+                WHEN OTHERS THEN NULL;
+            END;
+        END IF;
+            
     EXCEPTION
         WHEN OTHERS THEN
             log_error_internal('process_queue_fallback', 
-                'Critical error in fallback processor: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+                'Critical error in fallback processor (Pulse: ' || get_agent_pulse_mode() || '): ' || 
+                SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
             ROLLBACK;
     END process_queue_fallback;
 
@@ -2232,6 +3174,14 @@ AS
     PROCEDURE initialize_failover_system
     IS
     BEGIN
+
+        -- Check if already initialized
+        BEGIN
+            DBMS_SCHEDULER.DROP_JOB('PLT_HEALTH_MONITOR', TRUE); -- TRUE = force
+        EXCEPTION
+            WHEN OTHERS THEN NULL; -- Job doesn't exist, that's fine
+        END;
+
         -- Create health monitor job
         BEGIN
             DBMS_SCHEDULER.CREATE_JOB(
@@ -2239,7 +3189,7 @@ AS
                 job_type        => 'PLSQL_BLOCK',
                 job_action      => 'BEGIN PLTelemetry.manage_queue_processor; END;',
                 start_date      => SYSTIMESTAMP,
-                repeat_interval => 'FREQ=MINUTELY;INTERVAL=1',
+                repeat_interval => 'FREQ=SECONDLY;INTERVAL=30',
                 enabled         => TRUE,
                 comments        => 'Monitor external agent health and manage failover'
             );
@@ -2337,16 +3287,24 @@ AS
         l_optimal_size   NUMBER;
         l_min_batch      NUMBER;
         l_max_batch      NUMBER;
+        l_total_items    NUMBER;
+        l_failed_items   NUMBER;
     BEGIN
-        -- Get metrics from last 5 minutes
+        -- Get metrics from last 5 minutes with proper aggregation
         SELECT 
             AVG(avg_latency_ms),
-            AVG(CASE WHEN items_processed > 0 
-                THEN items_failed / items_processed 
-                ELSE 0 END)
-        INTO l_avg_latency, l_error_rate
+            SUM(items_failed),
+            SUM(items_processed + items_failed)
+        INTO l_avg_latency, l_failed_items, l_total_items
         FROM plt_fallback_metrics
         WHERE metric_time > SYSTIMESTAMP - INTERVAL '5' MINUTE;
+        
+        -- FIXED: Safe division by zero check
+        IF l_total_items IS NULL OR l_total_items = 0 THEN
+            l_error_rate := 0;
+        ELSE
+            l_error_rate := NVL(l_failed_items, 0) / l_total_items;
+        END IF;
         
         -- Get configured limits
         l_min_batch := TO_NUMBER(NVL(get_failover_config('MIN_BATCH_SIZE'), '10'));
@@ -2358,19 +3316,25 @@ AS
             l_optimal_size := TO_NUMBER(NVL(get_failover_config('DEFAULT_BATCH_SIZE'), '100'));
         ELSE
             -- Find the appropriate batch size based on latency
-            SELECT optimal_batch_size
-            INTO l_optimal_size
-            FROM (
+            BEGIN
                 SELECT optimal_batch_size
-                FROM plt_rate_limit_config
-                WHERE is_active = 'Y'
-                AND latency_threshold_ms >= l_avg_latency
-                ORDER BY priority
-            )
-            WHERE ROWNUM = 1;
+                INTO l_optimal_size
+                FROM (
+                    SELECT optimal_batch_size
+                    FROM plt_rate_limit_config
+                    WHERE is_active = 'Y'
+                    AND latency_threshold_ms >= l_avg_latency
+                    ORDER BY priority
+                )
+                WHERE ROWNUM = 1;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    -- Fallback if no config matches
+                    l_optimal_size := TO_NUMBER(NVL(get_failover_config('DEFAULT_BATCH_SIZE'), '100'));
+            END;
         END IF;
         
-        -- Apply error rate penalty
+        -- Apply error rate penalty (now safe from division by zero)
         IF l_error_rate > 0.1 THEN -- More than 10% errors
             l_optimal_size := l_optimal_size * 0.5;
         ELSIF l_error_rate > 0.05 THEN -- More than 5% errors
@@ -2378,11 +3342,11 @@ AS
         END IF;
         
         -- Respect configured bounds
-        RETURN GREATEST(l_min_batch, LEAST(l_max_batch, l_optimal_size));
+        RETURN GREATEST(l_min_batch, LEAST(l_max_batch, TRUNC(l_optimal_size)));
         
     EXCEPTION
-        WHEN NO_DATA_FOUND THEN
-            -- Fallback if no config found
+        WHEN OTHERS THEN
+            -- Ultimate fallback
             RETURN NVL(TO_NUMBER(get_failover_config('DEFAULT_BATCH_SIZE')), 50);
     END calculate_optimal_batch_size;
 
@@ -2481,6 +3445,222 @@ AS
                 'Circuit breaker check failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
             RETURN FALSE;
     END is_circuit_open;
+
+    -- ========================================================================
+    -- PULSE THROTTLING MANAGEMENT - BODY IMPLEMENTATION
+    -- ========================================================================
+
+    /**
+     * Get current agent pulse mode from failover config
+     */
+    FUNCTION get_agent_pulse_mode RETURN VARCHAR2
+    IS
+        l_pulse_mode VARCHAR2(10);
+    BEGIN
+        SELECT config_value
+        INTO l_pulse_mode
+        FROM plt_failover_config
+        WHERE config_key = 'AGENT_PULSE_MODE';
+        
+        RETURN l_pulse_mode;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            RETURN 'PULSE1';  -- Default to full capacity
+        WHEN OTHERS THEN
+            log_error_internal('get_agent_pulse_mode', 
+                'Error reading agent pulse mode: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN 'PULSE1';  -- Safe fallback
+    END get_agent_pulse_mode;
+
+    /**
+     * Get throttling configuration for specific pulse mode
+     */
+    FUNCTION get_pulse_throttling_config(p_pulse_mode VARCHAR2) RETURN plt_pulse_config_t
+    IS
+        l_config plt_pulse_config_t;
+    BEGIN
+        SELECT plt_pulse_config_t(
+            pulse_mode,
+            capacity_multiplier,
+            batch_multiplier,
+            interval_multiplier,
+            sampling_rate,
+            metrics_enabled,
+            logs_enabled,
+            queue_processing,
+            description
+        )
+        INTO l_config
+        FROM plt_pulse_throttling_config
+        WHERE pulse_mode = p_pulse_mode
+          AND is_active = 'Y';
+        
+        RETURN l_config;
+        
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            -- Return default PULSE1 config
+            SELECT plt_pulse_config_t(
+                'PULSE1', 1.0, 1.0, 1.0, 1.0, 'Y', 'Y', 'Y', 'Default fallback config'
+            ) INTO l_config FROM dual;
+            
+            log_error_internal('get_pulse_throttling_config', 
+                'Pulse mode not found: ' || p_pulse_mode || ', using PULSE1 defaults');
+            RETURN l_config;
+            
+        WHEN OTHERS THEN
+            -- Return safe fallback
+            SELECT plt_pulse_config_t(
+                'PULSE1', 1.0, 1.0, 1.0, 1.0, 'Y', 'Y', 'Y', 'Error fallback config'
+            ) INTO l_config FROM dual;
+            
+            log_error_internal('get_pulse_throttling_config', 
+                'Error getting pulse config: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN l_config;
+    END get_pulse_throttling_config;
+
+    /**
+     * Apply pulse throttling to a numeric value
+     */
+    FUNCTION apply_pulse_throttling(
+        p_original_value NUMBER, 
+        p_multiplier_type VARCHAR2
+    ) RETURN NUMBER
+    IS
+        l_pulse_mode VARCHAR2(10);
+        l_config plt_pulse_config_t;
+        l_multiplier NUMBER;
+        l_result NUMBER;
+    BEGIN
+        -- Get current pulse mode
+        l_pulse_mode := get_agent_pulse_mode();
+        
+        -- Get throttling config
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Select appropriate multiplier
+        l_multiplier := CASE UPPER(p_multiplier_type)
+            WHEN 'BATCH' THEN l_config.batch_multiplier
+            WHEN 'INTERVAL' THEN l_config.interval_multiplier
+            WHEN 'SAMPLING' THEN l_config.sampling_rate
+            WHEN 'CAPACITY' THEN l_config.capacity_multiplier
+            ELSE 1.0  -- No throttling for unknown types
+        END;
+        
+        -- Apply multiplier with bounds checking
+        l_result := p_original_value * l_multiplier;
+        
+        -- Ensure minimum values for certain types
+        IF UPPER(p_multiplier_type) = 'BATCH' THEN
+            l_result := GREATEST(l_result, 1);  -- Minimum batch size of 1
+        ELSIF UPPER(p_multiplier_type) = 'INTERVAL' THEN
+            l_result := GREATEST(l_result, 1);  -- Minimum interval of 1 second
+        END IF;
+        
+        RETURN TRUNC(l_result);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('apply_pulse_throttling', 
+                'Error applying throttling: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN p_original_value;  -- Return original on error
+    END apply_pulse_throttling;
+
+    /**
+     * Check if specific telemetry type should be processed based on pulse mode
+     */
+    FUNCTION should_process_telemetry(p_telemetry_type VARCHAR2) RETURN BOOLEAN
+    IS
+        l_pulse_mode VARCHAR2(10);
+        l_config plt_pulse_config_t;
+    BEGIN
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        RETURN CASE UPPER(p_telemetry_type)
+            WHEN 'METRICS' THEN l_config.metrics_enabled = 'Y'
+            WHEN 'LOGS' THEN l_config.logs_enabled = 'Y'
+            WHEN 'QUEUE' THEN l_config.queue_processing = 'Y'
+            ELSE TRUE  -- Allow unknown types
+        END;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('should_process_telemetry', 
+                'Error checking telemetry processing: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN TRUE;  -- Safe fallback - allow processing
+    END should_process_telemetry;
+
+    /**
+     * Get effective batch size based on current pulse mode
+     */
+    FUNCTION get_effective_batch_size(p_requested_batch_size NUMBER) RETURN NUMBER
+    IS
+    BEGIN
+        RETURN apply_pulse_throttling(p_requested_batch_size, 'BATCH');
+    END get_effective_batch_size;
+
+    /**
+     * Check if telemetry should be sampled based on pulse mode
+     */
+    FUNCTION should_sample_telemetry RETURN BOOLEAN
+    IS
+        l_pulse_mode VARCHAR2(10);
+        l_config plt_pulse_config_t;
+        l_random NUMBER;
+    BEGIN
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Generate random number between 0 and 1
+        l_random := DBMS_RANDOM.VALUE(0, 1);
+        
+        -- Sample if random number is less than sampling rate
+        RETURN l_random <= l_config.sampling_rate;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('should_sample_telemetry', 
+                'Error in telemetry sampling: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN TRUE;  -- Safe fallback - always sample on error
+    END should_sample_telemetry;
+
+    /**
+     * Update scheduler job intervals based on current pulse mode
+     */
+    PROCEDURE update_job_interval_for_pulse(p_job_name VARCHAR2)
+    IS
+        l_pulse_mode VARCHAR2(10);
+        l_config plt_pulse_config_t;
+        l_base_interval NUMBER := 60; -- Base interval in seconds
+        l_new_interval NUMBER;
+        l_interval_string VARCHAR2(100);
+    BEGIN
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Calculate new interval
+        l_new_interval := l_base_interval * l_config.interval_multiplier;
+        
+        -- Build interval string for DBMS_SCHEDULER
+        l_interval_string := 'FREQ=SECONDLY;INTERVAL=' || TRUNC(l_new_interval);
+        
+        -- Update the job
+        DBMS_SCHEDULER.SET_ATTRIBUTE(
+            name => p_job_name,
+            attribute => 'repeat_interval',
+            value => l_interval_string
+        );
+        
+        log_error_internal('update_job_interval_for_pulse', 
+            'Updated job ' || p_job_name || ' interval to ' || l_new_interval || 's for pulse ' || l_pulse_mode);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('update_job_interval_for_pulse', 
+                'Error updating job interval: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+    END update_job_interval_for_pulse;
 
 END PLTelemetry;
 /
