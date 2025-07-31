@@ -39,7 +39,7 @@ BEGIN
         job_type        => 'PLSQL_BLOCK',
         job_action      => 'BEGIN PLT_SERVICE_DISCOVERY.perform_discovery_checks(FALSE); END;',
         start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=SECONDLY;INTERVAL=.5', -- Every 30 seconds
+        repeat_interval => 'FREQ=SECONDLY;INTERVAL=30', -- Every 30 seconds
         enabled         => TRUE,
         auto_drop       => FALSE,
         comments        => 'PLTelemetry Service Discovery - Table-driven service health monitoring with escalation'

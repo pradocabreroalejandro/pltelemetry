@@ -50,7 +50,7 @@ services:
       - loki
       - prometheus
     networks:
-      - pltelemetry-network
+      - plt-demo
     restart: unless-stopped
 
   # =============================================================================

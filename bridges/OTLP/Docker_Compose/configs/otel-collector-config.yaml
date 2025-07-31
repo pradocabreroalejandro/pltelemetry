@@ -1,10 +1,4 @@
-# =============================================================================
-# OTEL COLLECTOR CONFIGURATION FOR PLTELEMETRY - FIXED VERSION
-# File: otel-collector-config.yaml
-# =============================================================================
-
 receivers:
-  # HTTP receiver for PLTelemetry (Oracle PL/SQL)
   otlp:
     protocols:
       grpc:
@@ -12,106 +6,87 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
         cors:
-          allowed_origins:
-            - "*"
-          allowed_headers:
-            - "*"
+          allowed_origins: ["*"]
+          allowed_headers: ["*"]
 
-  # Prometheus receiver for collector metrics
   prometheus:
     config:
       scrape_configs:
         - job_name: 'otel-collector'
-          scrape_interval: 10s
+          scrape_interval: 30s    # Moderado
           static_configs:
             - targets: ['localhost:8888']
 
 processors:
-  # Batch processor
-  batch:
-    timeout: 500ms
-    send_batch_size: 2048
-    send_batch_max_size: 4096
-
-  # Memory limiter to prevent OOM
+  # Memory limiter ajustado para 1.2GB total
   memory_limiter:
-    limit_mib: 1536
-    spike_limit_mib: 512
-    check_interval: 500ms
+    limit_mib: 1000         # Límite conservador dentro del contenedor
+    spike_limit_mib: 200    # Spike razonable
+    check_interval: 200ms   # Chequeo frecuente pero no excesivo
 
-  # Attributes processor for PLTelemetry specific handling
-  attributes:
-    actions:
-      # Add source identification
-      - key: telemetry.source
-        value: "oracle-plsql"
-        action: insert
+  # Batch processor equilibrado
+  batch:
+    timeout: 200ms          # Balance entre latencia y throughput
+    send_batch_size: 1000   # Lotes medianos
+    send_batch_max_size: 2000
 
-  # 🔥 FIXED: Resource processor - DON'T delete important attributes
   resource:
     attributes:
-      # Keep essential resource info with safe names
       - key: otel.service.name
         from_attribute: service.name
         action: upsert
       - key: otel.service.version
         from_attribute: service.version
         action: upsert
-      # DON'T DELETE - these are needed for Prometheus labels!
-      # - key: source
-      #   action: delete
-      # - key: telemetry.source
-      #   action: delete
 
 exporters:
-  # Send traces to Tempo
+  # Tempo OK
   otlp/tempo:
     endpoint: http://tempo:4317
     tls:
       insecure: true
 
-  # Send logs to Loki
+  # Loki OK
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
 
-  # 🔥 FIXED: Prometheus exporter with proper attribute conversion
+  # Prometheus moderado
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "pltelemetry"
     send_timestamps: true
-    metric_expiration: 180m
-    # 🔥 CRITICAL FIX: break or fix?
+    metric_expiration: 60m      # 1 hora - balance memoria/utilidad
     resource_to_telemetry_conversion:
       enabled: false
-    # Enable metric relabeling
     enable_open_metrics: true
 
-  # Debug output for development
+  # Debug muy limitado
   debug:
-    verbosity: detailed
-    sampling_initial: 5
-    sampling_thereafter: 200
-
-  # File export for backup/debugging
-  file:
-    path: /tmp/otel-output.json
+    verbosity: basic
+    sampling_initial: 1
+    sampling_thereafter: 1000   # Muy poco verbose
 
 service:
+  # 🔧 FIX: Telemetry sin address (inválido)
+  telemetry:
+    logs:
+      level: "warn"
+    metrics:
+      level: "basic"
+      # ❌ QUITAR: address: "0.0.0.0:8888"  <- ESTO ESTÁ MAL
+
   pipelines:
-    # Traces pipeline
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters: [otlp/tempo, debug]
+      exporters: [otlp/tempo]
 
-    # 🔥 FIXED: Metrics pipeline with proper resource handling
     metrics:
       receivers: [otlp, prometheus]
       processors: [memory_limiter, resource, batch]
-      exporters: [prometheus, debug]
+      exporters: [prometheus]
 
-    # Logs pipeline
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, attributes, batch]
-      exporters: [loki, debug]
+      processors: [memory_limiter, batch]
+      exporters: [loki]

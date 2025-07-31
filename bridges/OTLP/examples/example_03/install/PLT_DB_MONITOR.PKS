@@ -1,485 +1,371 @@
-CREATE OR REPLACE PACKAGE PLT_DB_MONITOR AS
+CREATE OR REPLACE PACKAGE PLT_DB_MONITOR
+AS
     /**
-     * PLTelemetry-enabled database validation monitoring system
+     * PLT_DB_MONITOR - Tenant-Aware Database Monitoring Package
+     * Version: 2.0.0 - Multi-Tenant Edition
      * 
-     * Features:
-     * - Table-driven configuration from db_validation_types/rules/instances
-     * - Environment-specific thresholds (PROD vs TEST)
-     * - Individual validation instances (all disabled by default)
-     * - Extensible validation framework - add any custom checks
-     * - Distributed tracing integration with PLTelemetry
-     * - Individual metrics per validation instance (no aggregation)
+     * Provides comprehensive database monitoring with tenant context.
+     * Each database instance monitors for a specific tenant/environment combination.
+     * 
+     * Key Features:
+     * - Automatic tenant context detection
+     * - Environment-aware validation rules
+     * - Tenant-specific validation instances
+     * - Integration with PLTelemetry for observability
+     * - Configurable thresholds per tenant/environment
      */
 
-    -- Validation statuses
-    SUBTYPE t_validation_status IS VARCHAR2(100);
-    C_OK        CONSTANT t_validation_status := 'OK';
-    C_WARNING   CONSTANT t_validation_status := 'WARNING';
-    C_CRITICAL  CONSTANT t_validation_status := 'CRITICAL';
-    C_ERROR     CONSTANT t_validation_status := 'ERROR';
+    --------------------------------------------------------------------------
+    -- TYPE DEFINITIONS
+    --------------------------------------------------------------------------
 
-    -- Environment detection
-    SUBTYPE t_environment IS VARCHAR2(10);
-    C_PROD      CONSTANT t_environment := 'PROD';
-    C_TEST      CONSTANT t_environment := 'TEST';
-    C_DEV       CONSTANT t_environment := 'DEV';
+    -- Tenant context record
+    TYPE t_tenant_context IS RECORD (
+        tenant_id VARCHAR2(100),
+        environment_name VARCHAR2(10),
+        instance_identifier VARCHAR2(100)
+    );
 
     -- Validation result record
     TYPE t_validation_result IS RECORD (
-        validation_type_code    VARCHAR2(100),
-        instance_name           VARCHAR2(100),
-        target_identifier       VARCHAR2(200),
-        current_value           NUMBER,
-        warning_threshold       NUMBER,
-        critical_threshold      NUMBER,
-        threshold_unit          VARCHAR2(100),
-        status                  t_validation_status,
-        status_message          VARCHAR2(4000),
-        check_timestamp         TIMESTAMP WITH TIME ZONE,
-        response_time_ms        NUMBER,
-        error_details           VARCHAR2(4000)
+        validation_type VARCHAR2(100),
+        instance_name VARCHAR2(100),
+        target_identifier VARCHAR2(200),
+        measured_value NUMBER,
+        warning_threshold NUMBER,
+        critical_threshold NUMBER,
+        status VARCHAR2(20),
+        message VARCHAR2(500)
     );
 
-    -- Validation instance runtime info
-    TYPE t_validation_runtime IS RECORD (
-        instance_id             NUMBER,
-        validation_type_code    VARCHAR2(100),
-        instance_name           VARCHAR2(100),
-        target_identifier       VARCHAR2(200),
-        is_enabled              NUMBER,
-        validation_procedure    VARCHAR2(100),
-        environment_name        VARCHAR2(10),
-        warning_threshold       NUMBER,
-        critical_threshold      NUMBER,
-        threshold_unit          VARCHAR2(100),
-        check_interval_minutes  NUMBER,
-        last_check_time         TIMESTAMP WITH TIME ZONE,
-        last_check_status       VARCHAR2(100),
-        last_check_value        NUMBER,
-        consecutive_failures    NUMBER
-    );
+    --------------------------------------------------------------------------
+    -- TENANT CONTEXT MANAGEMENT
+    --------------------------------------------------------------------------
 
     /**
-     * Initialize PLTelemetry configuration for database monitoring
-     * Must be called before any monitoring operations
+     * Detect current tenant context from configuration
+     * Replaces the old detect_environment() function
+     *
+     * @return t_tenant_context record with tenant_id, environment_name, instance_identifier
+     * @example
+     *   l_context := PLT_DB_MONITOR.detect_tenant_context();
      */
-    PROCEDURE configure_telemetry;
+    FUNCTION detect_tenant_context RETURN t_tenant_context;
 
     /**
-     * Main database validation check procedure - called by scheduled job
-     * Reads validation configuration from tables and performs checks
-     * 
-     * @param p_force_all_checks Force check all enabled validations regardless of schedule
-     * @param p_environment_name Target environment (PROD, TEST, DEV) - auto-detected if null
+     * Get current tenant ID for this database instance
+     *
+     * @return VARCHAR2 tenant identifier
+     */
+    FUNCTION get_current_tenant_id RETURN VARCHAR2;
+
+    /**
+     * Get current environment name for this database instance
+     *
+     * @return VARCHAR2 environment name (PROD, UAT, DEV, TEST)
+     */
+    FUNCTION get_current_environment_name RETURN VARCHAR2;
+
+    /**
+     * Get current instance identifier
+     *
+     * @return VARCHAR2 instance identifier
+     */
+    FUNCTION get_current_instance_identifier RETURN VARCHAR2;
+
+    /**
+     * Update tenant context configuration
+     *
+     * @param p_tenant_id New tenant identifier
+     * @param p_environment_name New environment name
+     * @param p_instance_identifier New instance identifier
+     * @param p_description Optional description
+     */
+    PROCEDURE update_tenant_context(
+        p_tenant_id VARCHAR2,
+        p_environment_name VARCHAR2,
+        p_instance_identifier VARCHAR2 DEFAULT NULL,
+        p_description VARCHAR2 DEFAULT NULL
+    );
+
+    --------------------------------------------------------------------------
+    -- MAIN VALIDATION ORCHESTRATOR
+    --------------------------------------------------------------------------
+
+    /**
+     * Perform all database validations for current tenant/environment
+     * This is the main entry point called by scheduler jobs
+     *
+     * @param p_force_all_checks Force all checks regardless of intervals (default FALSE)
+     * @param p_trace_id Optional trace ID for distributed tracing
      */
     PROCEDURE perform_database_validations(
         p_force_all_checks BOOLEAN DEFAULT FALSE,
-        p_environment_name VARCHAR2 DEFAULT NULL
+        p_trace_id VARCHAR2 DEFAULT NULL
     );
 
     /**
-     * Execute specific validation type for all enabled instances
-     * 
-     * @param p_validation_type_code Type of validation to run
-     * @param p_environment_name Target environment 
+     * Perform specific validation type for current tenant/environment
+     *
+     * @param p_validation_type_code Validation type to execute
+     * @param p_instance_name Optional specific instance name
      * @param p_trace_id Optional trace ID for distributed tracing
      */
-    PROCEDURE execute_validation_type(
-        p_validation_type_code IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+    PROCEDURE perform_validation_type(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2 DEFAULT NULL,
+        p_trace_id VARCHAR2 DEFAULT NULL
     );
 
-    /**
-     * Execute validation for a specific instance
-     * 
-     * @param p_instance_name Specific validation instance to check
-     * @param p_environment_name Target environment
-     * @param p_trace_id Optional trace ID for distributed tracing
-     * @return Validation result
-     */
-    FUNCTION execute_validation_instance(
-        p_instance_name IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    -- =========================================================================
-    -- INDIVIDUAL VALIDATION PROCEDURES
-    -- =========================================================================
+    --------------------------------------------------------------------------
+    -- SPECIFIC VALIDATION PROCEDURES
+    --------------------------------------------------------------------------
 
     /**
-     * Validate tablespace usage percentage
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Tablespace name
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Validate tablespace usage for current tenant
+     *
+     * @param p_instance_name Specific tablespace instance name
+     * @param p_target_identifier Tablespace name to validate
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_tablespace_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate active sessions count
-     * 
-     * @param p_instance_name Validation instance name
+     * Validate active sessions count for current tenant
+     *
+     * @param p_instance_name Instance name
      * @param p_target_identifier Target identifier (usually 'ALL')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_active_sessions(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate blocked sessions count
-     * 
-     * @param p_instance_name Validation instance name
+     * Validate blocked sessions count for current tenant
+     *
+     * @param p_instance_name Instance name
      * @param p_target_identifier Target identifier (usually 'ALL')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_blocked_sessions(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate invalid objects count
-     * 
-     * @param p_instance_name Validation instance name
+     * Validate invalid objects count for current tenant
+     *
+     * @param p_instance_name Instance name
      * @param p_target_identifier Target identifier (usually 'ALL')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_invalid_objects(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate failed jobs count (granular with job details)
-     * 
-     * @param p_instance_name Validation instance name
+     * Validate failed scheduler jobs for current tenant
+     *
+     * @param p_instance_name Instance name
      * @param p_target_identifier Target identifier (usually 'ALL')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_failed_jobs(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate memory usage percentage
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Memory type (SGA, PGA)
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Validate memory usage for current tenant
+     *
+     * @param p_instance_name Instance name
+     * @param p_target_identifier Memory type (SGA, PGA, etc.)
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate CPU usage percentage
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier CPU target (usually 'DB_CPU')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Validate CPU usage for current tenant
+     *
+     * @param p_instance_name Instance name
+     * @param p_target_identifier CPU type identifier
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_cpu_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    /**
-     * Validate certificate expiration (wildcard validation example)
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Certificate identifier
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
-     */
-    FUNCTION validate_certificate_expiration(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    -- =========================================================================
-    -- CONFIGURATION AND MANAGEMENT FUNCTIONS
-    -- =========================================================================
-
-    /**
-     * Auto-detect current environment based on database name/context
-     * 
-     * @return Environment name (PROD, TEST, DEV)
-     */
-    FUNCTION detect_environment RETURN VARCHAR2;
-
-    /**
-     * Get validation runtime configuration for an instance
-     * Combines database config with runtime state
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_environment_name Environment name
-     * @return Validation runtime information
-     */
-    FUNCTION get_validation_runtime(
         p_instance_name VARCHAR2,
-        p_environment_name VARCHAR2
-    ) RETURN t_validation_runtime;
-
-    /**
-     * Get list of validation instances due for checking
-     * Based on last_check_time and check intervals
-     * 
-     * @param p_force_all Include all enabled instances regardless of schedule
-     * @param p_environment_name Target environment
-     * @return Cursor with instances due for checking
-     */
-    FUNCTION get_validations_due_for_check(
-        p_force_all BOOLEAN DEFAULT FALSE,
-        p_environment_name VARCHAR2 DEFAULT NULL
-    ) RETURN SYS_REFCURSOR;
-
-    /**
-     * Enable/disable monitoring for a specific validation instance
-     * 
-     * @param p_instance_name Validation instance to enable/disable
-     * @param p_enabled 1 to enable, 0 to disable
-     */
-    PROCEDURE set_validation_monitoring(
-        p_instance_name VARCHAR2,
-        p_enabled NUMBER
-    );
-
-    /**
-     * Add a new validation instance
-     * 
-     * @param p_validation_type_code Type of validation
-     * @param p_instance_name Unique instance name
-     * @param p_instance_description Description
-     * @param p_target_identifier Database target identifier
-     * @param p_enabled Enable immediately (default 0 - disabled)
-     */
-    PROCEDURE add_validation_instance(
-        p_validation_type_code VARCHAR2,
-        p_instance_name VARCHAR2,
-        p_instance_description VARCHAR2,
         p_target_identifier VARCHAR2,
-        p_enabled NUMBER DEFAULT 0
-    );
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result;
 
     /**
-     * Remove a validation instance
-     * 
-     * @param p_instance_name Instance to remove
-     */
-    PROCEDURE remove_validation_instance(p_instance_name VARCHAR2);
-
-    /**
-     * Update validation instance configuration
-     * 
-     * @param p_instance_name Instance to update
-     * @param p_instance_description New description (optional)
-     * @param p_target_identifier New target identifier (optional)
-     */
-    PROCEDURE update_validation_instance(
-        p_instance_name VARCHAR2,
-        p_instance_description VARCHAR2 DEFAULT NULL,
-        p_target_identifier VARCHAR2 DEFAULT NULL
-    );
-
-    /**
-     * Reset failure counters for a validation instance
-     * 
-     * @param p_instance_name Instance to reset
-     */
-    PROCEDURE reset_validation_failures(p_instance_name VARCHAR2);
-
-    /**
-     * Update validation thresholds for an environment
-     * 
-     * @param p_validation_type_code Validation type
-     * @param p_environment_name Environment
-     * @param p_warning_threshold New warning threshold (optional)
-     * @param p_critical_threshold New critical threshold (optional)
-     * @param p_check_interval_minutes New check interval (optional)
-     */
-    PROCEDURE update_validation_thresholds(
-        p_validation_type_code VARCHAR2,
-        p_environment_name VARCHAR2,
-        p_warning_threshold NUMBER DEFAULT NULL,
-        p_critical_threshold NUMBER DEFAULT NULL,
-        p_check_interval_minutes NUMBER DEFAULT NULL
-    );
-
-    /**
-     * Generate comprehensive database monitoring report
-     * 
-     * @param p_hours_back Hours of history to include (default 24)
-     * @param p_environment_name Target environment (auto-detected if null)
-     * @return JSON report of database validation status
-     */
-    FUNCTION generate_monitoring_report(
-        p_hours_back NUMBER DEFAULT 24,
-        p_environment_name VARCHAR2 DEFAULT NULL
-    ) RETURN CLOB;
-
-    /**
-     * Populate tablespace instances automatically from DBA_TABLESPACES
-     * Discovers all tablespaces and creates validation instances (disabled by default)
-     * 
-     * @param p_exclude_temp_tablespaces Exclude temporary tablespaces (default TRUE)
-     */
-    PROCEDURE auto_populate_tablespace_instances(
-        p_exclude_temp_tablespaces BOOLEAN DEFAULT TRUE
-    );
-
-    /**
-     * Populate scheduler job instances automatically from DBA_SCHEDULER_JOBS
-     * Discovers all enabled jobs and creates validation instances (disabled by default)
-     * 
-     * @param p_exclude_system_jobs Exclude Oracle system jobs (default TRUE)
-     */
-    PROCEDURE auto_populate_job_instances(
-        p_exclude_system_jobs BOOLEAN DEFAULT TRUE
-    );
-
-    /**
-     * Validate database CPU time ratio (Oracle 23ai)
+     * Validate database CPU ratio for current tenant
+     *
+     * @param p_instance_name Instance name
+     * @param p_target_identifier Target identifier
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_database_cpu_ratio(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
     /**
-     * Validate CPU usage per transaction (Oracle 23ai)
-     */
-    FUNCTION validate_cpu_usage_per_txn(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    /**
-     * Validate background CPU usage (Oracle 23ai)
-     */
-    FUNCTION validate_background_cpu_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    /**
-     * Validate CPU time per user call (Oracle 23ai)
-     */
-    FUNCTION validate_cpu_time_per_call(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
-
-    /**
-     * Validate PGA memory usage percentage
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Target identifier (usually 'PGA')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Validate PGA memory usage for current tenant
+     *
+     * @param p_instance_name Instance name
+     * @param p_target_identifier Target identifier
+     * @param p_trace_id Optional trace ID for tracing
+     * @return t_validation_result with validation outcome
      */
     FUNCTION validate_pga_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
     ) RETURN t_validation_result;
 
-    /**
-     * Validate UGA memory usage percentage
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Target identifier (usually 'UGA')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
-     */
-    FUNCTION validate_uga_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
+    --------------------------------------------------------------------------
+    -- UTILITY AND HELPER FUNCTIONS
+    --------------------------------------------------------------------------
 
     /**
-     * Validate memory sorts count
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Target identifier (usually 'MEMORY_SORTS')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Get validation rules for current tenant/environment
+     *
+     * @param p_validation_type_code Validation type code
+     * @return Cursor with warning_threshold, critical_threshold, check_interval_minutes
      */
-    FUNCTION validate_memory_sorts_count(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
+    FUNCTION get_validation_rules_for_current_tenant(p_validation_type_code VARCHAR2)
+        RETURN SYS_REFCURSOR;
 
     /**
-     * Validate work area memory allocated
-     * 
-     * @param p_instance_name Validation instance name
-     * @param p_target_identifier Target identifier (usually 'WORKAREA')
-     * @param p_environment_name Environment (PROD/TEST/DEV)
-     * @param p_trace_id Optional trace ID
-     * @return Validation result
+     * Get enabled validation instances for current tenant/environment
+     *
+     * @param p_validation_type_code Optional filter by validation type
+     * @return Cursor with instance details
      */
-    FUNCTION validate_workarea_memory_allocated(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result;
+    FUNCTION get_enabled_instances_for_current_tenant(p_validation_type_code VARCHAR2 DEFAULT NULL)
+        RETURN SYS_REFCURSOR;
+
+    /**
+     * Check if validation is due for execution based on interval
+     *
+     * @param p_validation_type_code Validation type
+     * @param p_instance_name Instance name
+     * @param p_force_check Force check regardless of interval
+     * @return TRUE if validation should be executed
+     */
+    FUNCTION is_validation_due(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_force_check BOOLEAN DEFAULT FALSE
+    ) RETURN BOOLEAN;
+
+    /**
+     * Update validation instance results
+     *
+     * @param p_validation_type_code Validation type
+     * @param p_instance_name Instance name
+     * @param p_status Validation status (OK, WARNING, CRITICAL, ERROR)
+     * @param p_measured_value Measured value
+     * @param p_error_message Optional error message
+     */
+    PROCEDURE update_validation_result(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_status VARCHAR2,
+        p_measured_value NUMBER DEFAULT NULL,
+        p_error_message VARCHAR2 DEFAULT NULL
+    );
+
+    /**
+     * Send validation metrics to PLTelemetry
+     *
+     * @param p_validation_result Validation result record
+     * @param p_trace_id Optional trace ID for correlation
+     */
+    PROCEDURE send_validation_metrics(
+        p_validation_result t_validation_result,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    );
+
+    /**
+     * Log validation events to PLTelemetry
+     *
+     * @param p_validation_type Validation type
+     * @param p_instance_name Instance name
+     * @param p_event_name Event name
+     * @param p_message Event message
+     * @param p_trace_id Optional trace ID for correlation
+     */
+    PROCEDURE log_validation_event(
+        p_validation_type VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_event_name VARCHAR2,
+        p_message VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    );
+
+    --------------------------------------------------------------------------
+    -- CONFIGURATION AND MAINTENANCE
+    --------------------------------------------------------------------------
+
+    /**
+     * Enable/disable validation instance for current tenant
+     *
+     * @param p_validation_type_code Validation type
+     * @param p_instance_name Instance name
+     * @param p_enabled TRUE to enable, FALSE to disable
+     */
+    PROCEDURE set_validation_instance_enabled(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_enabled BOOLEAN
+    );
+
+    /**
+     * Get tenant monitoring status summary
+     *
+     * @return Cursor with monitoring summary for current tenant
+     */
+    FUNCTION get_tenant_monitoring_status RETURN SYS_REFCURSOR;
+
+    /**
+     * Validate tenant configuration and setup
+     *
+     * @return TRUE if configuration is valid
+     */
+    FUNCTION validate_tenant_configuration RETURN BOOLEAN;
+
+    /**
+     * Initialize monitoring for current tenant
+     * Creates default validation instances based on detected database objects
+     *
+     * @param p_auto_enable_instances Automatically enable created instances (default FALSE)
+     */
+    PROCEDURE initialize_tenant_monitoring(p_auto_enable_instances BOOLEAN DEFAULT FALSE);
 
 END PLT_DB_MONITOR;
 /

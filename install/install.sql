@@ -55,22 +55,7 @@ BEGIN
                 'Cannot verify UTL_HTTP access. Please ensure: GRANT EXECUTE ON UTL_HTTP TO ' || USER);
     END;
     
-    -- Check DBMS_CRYPTO access
-    BEGIN
-        SELECT COUNT(*) INTO l_count 
-        FROM USER_TAB_PRIVS 
-        WHERE TABLE_NAME = 'DBMS_CRYPTO' AND PRIVILEGE = 'EXECUTE';
-        
-        IF l_count = 0 THEN
-            RAISE_APPLICATION_ERROR(-20003, 
-                'Missing EXECUTE privilege on DBMS_CRYPTO. Please grant: GRANT EXECUTE ON DBMS_CRYPTO TO ' || USER);
-        END IF;
-        DBMS_OUTPUT.PUT_LINE('✓ DBMS_CRYPTO access verified');
-    EXCEPTION
-        WHEN OTHERS THEN
-            RAISE_APPLICATION_ERROR(-20003, 
-                'Cannot verify DBMS_CRYPTO access. Please ensure: GRANT EXECUTE ON DBMS_CRYPTO TO ' || USER);
-    END;
+    
 END;
 /
 

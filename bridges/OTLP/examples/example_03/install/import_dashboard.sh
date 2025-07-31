@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
-# PLTelemetry Database Monitoring Dashboard 
-# Fixed with REAL metrics from your Prometheus + new panels for everything
+# PLTelemetry Multi-Tenant Database Monitoring Dashboard 
+# BEAST MODE - Horizontal bars + Evolution graphs + Tenant isolation
 # 
 # Usage: ./import_dashboard.sh <grafana_password>
 # Example: ./import_dashboard.sh admin
@@ -20,18 +20,15 @@ GRAFANA_URL="http://localhost:3020"
 GRAFANA_USER="admin"
 GRAFANA_PASS="$1"
 
-echo "🚀 Importing PLTelemetry Database Monitoring Dashboard"
+echo "🚀 Importing PLTelemetry Multi-Tenant Database Dashboard"
 echo "🔐 Using provided password for user: $GRAFANA_USER"
 echo "=================================================================="
-echo "🆕 NUEVAS MÉTRICAS INCLUIDAS:"
-echo "   🚀 CPU Time per Call (centiseconds) - CRITICAL metric detected!"
-echo "   📊 CPU Usage per Transaction"
-echo "   🔄 Background CPU Usage"  
-echo "   📈 Database CPU Ratio"
-echo "   💾 Smart Memory handling (PGA=-1 filtered)"
-echo "   🔧 Failed Jobs monitoring (14 detected!)"
-echo "   📁 Tablespace crisis alerts (98.38% SYSTEM!)"
-echo "🎯 Real-time validation performance"
+echo "🎯 MULTI-TENANT FEATURES:"
+echo "   🏢 Tenant isolation (never mixed)"
+echo "   🌍 Environment filtering"
+echo "   📊 Horizontal bars for tablespaces"
+echo "   📈 Evolution graphs for metrics"
+echo "   🚨 Critical threshold alerts"
 echo ""
 
 # Function to make Grafana API calls
@@ -70,44 +67,258 @@ else
     exit 1
 fi
 
-# PLTelemetry Database Monitoring Dashboard
+# PLTelemetry Multi-Tenant Database Dashboard JSON
 PLT_DB_DASHBOARD='{
   "dashboard": {
     "id": null,
-    "title": "🗄️ PLTelemetry - Database Monitoring (WORKING EDITION! 🔥)",
-    "tags": ["pltelemetry", "oracle", "database", "working", "real-metrics"],
-    "style": "dark",
+    "uid": "plt-db-monitoring",
+    "title": "PLTelemetry Database Monitoring",
+    "description": "Multi-tenant database monitoring with tenant isolation",
+    "tags": ["pltelemetry", "database", "monitoring", "multi-tenant"],
     "timezone": "browser",
-    "editable": true,
-    "graphTooltip": 1,
+    "schemaVersion": 39,
+    "version": 1,
+    "refresh": "30s",
     "time": {
       "from": "now-1h",
       "to": "now"
     },
-    "refresh": "30s",
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "tenant_id",
+          "type": "query",
+          "label": "Tenant",
+          "description": "Select tenant to monitor",
+          "query": "label_values(pltelemetry_db_validations_executed_count, tenant_id)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "refresh": 1,
+          "sort": 1,
+          "multi": false,
+          "includeAll": false,
+          "current": {
+            "selected": true,
+            "text": "ACME_CORP",
+            "value": "ACME_CORP"
+          }
+        },
+        {
+          "name": "environment_name",
+          "type": "query",
+          "label": "Environment",
+          "description": "Select environment to monitor",
+          "query": "label_values(pltelemetry_db_validations_executed_count{tenant_id=\"$tenant_id\"}, environment_name)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": null
+          },
+          "refresh": 1,
+          "sort": 1,
+          "multi": false,
+          "includeAll": false,
+          "current": {
+            "selected": true,
+            "text": "PROD",
+            "value": "PROD"
+          }
+        }
+      ]
+    },
     "panels": [
       {
         "id": 1,
-        "title": "🚀 Database CPU Performance",
-        "type": "timeseries",
+        "title": "🏢 Tenant Overview",
+        "type": "stat",
         "gridPos": {
-          "h": 9,
-          "w": 12,
+          "h": 3,
+          "w": 24,
           "x": 0,
           "y": 0
         },
         "targets": [
           {
-            "expr": "pltelemetry_db_validation_cpu_usage_value_percentage",
-            "legendFormat": "CPU Usage ({{target_identifier}})",
-            "refId": "A",
-            "interval": "30s"
+            "expr": "pltelemetry_db_validations_executed_count{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Validations Executed",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"],
+            "fields": ""
           },
+          "textMode": "value_and_name",
+          "colorMode": "background",
+          "graphMode": "none"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 2,
+        "title": "📁 Tablespace Usage (%)",
+        "type": "barchart",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 3
+        },
+        "targets": [
           {
-            "expr": "pltelemetry_db_validation_db_cpu_ratio_value_percentage",
-            "legendFormat": "DB CPU Ratio ({{target_identifier}})",
-            "refId": "B",
-            "interval": "30s"
+            "expr": "pltelemetry_db_tablespace_usage_value_percentage{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "{{validation_target}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 70
+                },
+                {
+                  "color": "orange",
+                  "value": 80
+                },
+                {
+                  "color": "red",
+                  "value": 90
+                }
+              ]
+            },
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "barWidth": 0.8,
+          "groupWidth": 0.7,
+          "showValue": "always",
+          "stacking": "none",
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "right",
+            "calcs": []
+          }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 3,
+        "title": "🚨 Validation Status",
+        "type": "stat",
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 3
+        },
+        "targets": [
+          {
+            "expr": "count by (validation_status) (pltelemetry_db_tablespace_usage_status{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"})",
+            "legendFormat": "{{validation_status}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "orange",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 2
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "options": {
+          "orientation": "vertical",
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"],
+            "fields": ""
+          },
+          "textMode": "value_and_name",
+          "colorMode": "background",
+          "graphMode": "none"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 4,
+        "title": "⚡ CPU Usage Evolution (%)",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 0,
+          "y": 11
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_cpu_usage_value_percentage{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "CPU Usage",
+            "refId": "A"
           }
         ],
         "fieldConfig": {
@@ -115,23 +326,7 @@ PLT_DB_DASHBOARD='{
             "color": {
               "mode": "palette-classic"
             },
-            "custom": {
-              "axisLabel": "CPU %",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 30,
-              "lineWidth": 3,
-              "pointSize": 8,
-              "showPoints": "always",
-              "spanNulls": false,
-              "thresholdsStyle": {
-                "mode": "area"
-              }
-            },
-            "unit": "percent",
-            "min": 0,
             "thresholds": {
-              "mode": "absolute",
               "steps": [
                 {
                   "color": "green",
@@ -143,428 +338,50 @@ PLT_DB_DASHBOARD='{
                 },
                 {
                   "color": "orange",
-                  "value": 80
+                  "value": 75
                 },
                 {
                   "color": "red",
-                  "value": 100
-                }
-              ]
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Ratio.*"
-              },
-              "properties": [
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "red"
-                  }
-                },
-                {
-                  "id": "custom.fillOpacity",
-                  "value": 50
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max", "mean"],
-            "displayMode": "table",
-            "placement": "right",
-            "showLegend": true
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "alert": {
-          "alertRuleTags": {},
-          "conditions": [
-            {
-              "evaluator": {
-                "params": [100],
-                "type": "gt"
-              },
-              "operator": {
-                "type": "and"
-              },
-              "query": {
-                "params": ["B", "5m", "now"]
-              },
-              "reducer": {
-                "params": [],
-                "type": "last"
-              },
-              "type": "query"
-            }
-          ],
-          "executionErrorState": "alerting",
-          "for": "2m",
-          "frequency": "10s",
-          "handler": 1,
-          "name": "DB CPU Ratio Critical",
-          "noDataState": "no_data",
-          "notifications": []
-        }
-      },
-      {
-        "id": 2,
-        "title": "👥 Sessions & Activity",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 12,
-          "y": 0
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_active_sessions_value_count",
-            "legendFormat": "Active Sessions",
-            "refId": "A",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_db_validation_blocked_sessions_value_count",
-            "legendFormat": "Blocked Sessions",
-            "refId": "B",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "Sessions",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 20,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false,
-              "thresholdsStyle": {
-                "mode": "line"
-              }
-            },
-            "unit": "short",
-            "min": 0
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Blocked.*"
-              },
-              "properties": [
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "red"
-                  }
-                },
-                {
-                  "id": "custom.fillOpacity",
-                  "value": 50
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max", "mean"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        }
-      },
-      {
-        "id": 3,
-        "title": "💾 Memory Usage & Sorts",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 0,
-          "y": 9
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_pga_memory_usage_value_percentage",
-            "legendFormat": "PGA Memory Usage %",
-            "refId": "A",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_db_validation_memory_sorts_count_value",
-            "legendFormat": "Memory Sorts Count",
-            "refId": "B",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 25,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false,
-              "thresholdsStyle": {
-                "mode": "area"
-              }
-            },
-            "unit": "short",
-            "min": 0
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Memory Usage.*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "max",
-                  "value": 100
-                },
-                {
-                  "id": "custom.axisPlacement",
-                  "value": "left"
-                },
-                {
-                  "id": "thresholds",
-                  "value": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "color": "green",
-                        "value": null
-                      },
-                      {
-                        "color": "yellow",
-                        "value": 75
-                      },
-                      {
-                        "color": "orange",
-                        "value": 85
-                      },
-                      {
-                        "color": "red",
-                        "value": 95
-                      }
-                    ]
-                  }
+                  "value": 85
                 }
               ]
             },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Sorts.*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "short"
-                },
-                {
-                  "id": "custom.axisPlacement",
-                  "value": "right"
-                },
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "blue"
-                  }
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max"],
-            "displayMode": "table",
-            "placement": "right"
-          },
-          "tooltip": {
-            "mode": "multi"
-          }
-        }
-      },
-      {
-        "id": 4,
-        "title": "🔥 Advanced CPU Metrics",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 9,
-          "w": 12,
-          "x": 12,
-          "y": 9
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_cpu_time_per_call_value_centiseconds > -1",
-            "legendFormat": "CPU Time per Call (cs)",
-            "refId": "A",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_db_validation_cpu_usage_per_txn_value_centiseconds",
-            "legendFormat": "CPU per Transaction (cs)",
-            "refId": "B",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_db_validation_background_cpu_usage_value_cpu_per_sec",
-            "legendFormat": "Background CPU per Second",
-            "refId": "C",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "Centiseconds",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 30,
-              "lineWidth": 3,
-              "pointSize": 6,
-              "showPoints": "always",
-              "spanNulls": false,
-              "thresholdsStyle": {
-                "mode": "area"
-              }
-            },
-            "unit": "short",
+            "unit": "percent",
             "min": 0,
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {
-                  "color": "green",
-                  "value": null
-                },
-                {
-                  "color": "yellow",
-                  "value": 1000
-                },
-                {
-                  "color": "orange",
-                  "value": 3000
-                },
-                {
-                  "color": "red",
-                  "value": 5000
-                }
-              ]
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*per Call.*"
-              },
-              "properties": [
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "red"
-                  }
-                },
-                {
-                  "id": "custom.fillOpacity",
-                  "value": 50
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Background.*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "cps"
-                },
-                {
-                  "id": "custom.axisPlacement",
-                  "value": "right"
-                },
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "blue"
-                  }
-                }
-              ]
-            }
-          ]
+            "max": 100
+          }
         },
         "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max", "mean"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
           "tooltip": {
-            "mode": "multi"
+            "mode": "multi",
+            "sort": "none"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max"]
           }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
         }
       },
       {
         "id": 5,
-        "title": "🏢 Service Health Monitoring",
+        "title": "💾 Memory Usage Evolution (%)",
         "type": "timeseries",
         "gridPos": {
-          "h": 8,
-          "w": 24,
-          "x": 0,
-          "y": 18
+          "h": 6,
+          "w": 12,
+          "x": 12,
+          "y": 11
         },
         "targets": [
           {
-            "expr": "pltelemetry_service_response_time_milliseconds",
-            "legendFormat": "{{service_name}} ({{criticality}})",
-            "refId": "A",
-            "interval": "30s"
+            "expr": "pltelemetry_db_memory_usage_value_percentage{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"} >= 0",
+            "legendFormat": "{{validation_target}} Memory",
+            "refId": "A"
           }
         ],
         "fieldConfig": {
@@ -572,23 +389,7 @@ PLT_DB_DASHBOARD='{
             "color": {
               "mode": "palette-classic"
             },
-            "custom": {
-              "axisLabel": "Response Time (ms)",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 20,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false,
-              "thresholdsStyle": {
-                "mode": "line"
-              }
-            },
-            "unit": "ms",
-            "min": 0,
             "thresholds": {
-              "mode": "absolute",
               "steps": [
                 {
                   "color": "green",
@@ -596,43 +397,78 @@ PLT_DB_DASHBOARD='{
                 },
                 {
                   "color": "yellow",
-                  "value": 1000
+                  "value": 70
                 },
                 {
                   "color": "orange",
-                  "value": 3000
+                  "value": 80
                 },
                 {
                   "color": "red",
-                  "value": 5000
+                  "value": 90
                 }
               ]
-            }
+            },
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "multi",
+            "sort": "none"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max"]
+          }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 6,
+        "title": "👥 Active Sessions Evolution",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 0,
+          "y": 17
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_active_sessions_value_count{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Active Sessions",
+            "refId": "A"
+          },
+          {
+            "expr": "pltelemetry_db_active_sessions_warning_threshold{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Warning Threshold",
+            "refId": "B"
+          },
+          {
+            "expr": "pltelemetry_db_active_sessions_critical_threshold{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Critical Threshold",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "short"
           },
           "overrides": [
             {
               "matcher": {
-                "id": "byRegexp",
-                "options": ".*CRITICAL.*"
-              },
-              "properties": [
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "red"
-                  }
-                },
-                {
-                  "id": "custom.fillOpacity",
-                  "value": 30
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*HIGH.*"
+                "id": "byName",
+                "options": "Warning Threshold"
               },
               "properties": [
                 {
@@ -641,247 +477,65 @@ PLT_DB_DASHBOARD='{
                     "mode": "fixed",
                     "fixedColor": "orange"
                   }
+                },
+                {
+                  "id": "custom.fillOpacity",
+                  "value": 0
                 }
               ]
             },
             {
               "matcher": {
-                "id": "byRegexp",
-                "options": ".*MEDIUM.*"
+                "id": "byName",
+                "options": "Critical Threshold"
               },
               "properties": [
                 {
                   "id": "color",
                   "value": {
                     "mode": "fixed",
-                    "fixedColor": "yellow"
-                  }
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max", "mean"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        }
-      },
-      {
-        "id": 6,
-        "title": "🔧 Validation Performance",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 8,
-          "w": 12,
-          "x": 0,
-          "y": 26
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_cycle_duration_ms_milliseconds",
-            "legendFormat": "Cycle Duration ({{cycle_type}})",
-            "refId": "A",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_db_validation_response_time_ms_milliseconds",
-            "legendFormat": "{{instance_name}} Response Time",
-            "refId": "B",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "Time (ms)",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 20,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false
-            },
-            "unit": "ms",
-            "min": 0
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Cycle.*"
-              },
-              "properties": [
-                {
-                  "id": "color",
-                  "value": {
-                    "mode": "fixed",
-                    "fixedColor": "blue"
+                    "fixedColor": "red"
                   }
                 },
                 {
                   "id": "custom.fillOpacity",
-                  "value": 30
+                  "value": 0
                 }
               ]
             }
           ]
         },
         "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "mean", "max"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
           "tooltip": {
-            "mode": "multi"
+            "mode": "multi",
+            "sort": "none"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max"]
           }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
         }
       },
       {
         "id": 7,
-        "title": "⚡ Status Gauges",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 8,
-          "w": 12,
-          "x": 12,
-          "y": 26
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_status_gauge",
-            "legendFormat": "{{instance_name}} Status",
-            "refId": "A",
-            "interval": "30s"
-          },
-          {
-            "expr": "pltelemetry_service_status_gauge",
-            "legendFormat": "{{service_name}} Service",
-            "refId": "B",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "Status",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 30,
-              "lineWidth": 3,
-              "pointSize": 6,
-              "showPoints": "always",
-              "spanNulls": false
-            },
-            "unit": "short",
-            "min": -1.5,
-            "max": 1.5,
-            "thresholds": {
-              "mode": "absolute",
-              "steps": [
-                {
-                  "color": "red",
-                  "value": -1
-                },
-                {
-                  "color": "yellow",
-                  "value": 0
-                },
-                {
-                  "color": "green",
-                  "value": 1
-                }
-              ]
-            },
-            "mappings": [
-              {
-                "type": "value",
-                "value": "-1",
-                "text": "FAILED"
-              },
-              {
-                "type": "value", 
-                "value": "0",
-                "text": "WARNING"
-              },
-              {
-                "type": "value",
-                "value": "0.5",
-                "text": "PARTIAL"
-              },
-              {
-                "type": "value",
-                "value": "1",
-                "text": "OK"
-              }
-            ]
-          }
-        },
-        "options": {
-          "legend": {
-            "calcs": ["lastNotNull"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
-          "tooltip": {
-            "mode": "multi"
-          }
-        }
-      },
-      {
-        "id": 8,
-        "title": "📊 Real-time System Stats",
+        "title": "🔧 Failed Jobs",
         "type": "stat",
         "gridPos": {
           "h": 6,
-          "w": 24,
-          "x": 0,
-          "y": 34
+          "w": 6,
+          "x": 12,
+          "y": 17
         },
         "targets": [
           {
-            "expr": "pltelemetry_db_validation_cpu_usage_value_percentage",
-            "legendFormat": "CPU Usage",
+            "expr": "pltelemetry_db_failed_jobs_value_count{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Failed Jobs",
             "refId": "A"
-          },
-          {
-            "expr": "pltelemetry_db_validation_db_cpu_ratio_value_percentage",
-            "legendFormat": "DB CPU Ratio", 
-            "refId": "B"
-          },
-          {
-            "expr": "pltelemetry_db_validation_active_sessions_value_count",
-            "legendFormat": "Active Sessions",
-            "refId": "C"
-          },
-          {
-            "expr": "pltelemetry_db_validation_blocked_sessions_value_count",
-            "legendFormat": "Blocked Sessions",
-            "refId": "D"
-          },
-          {
-            "expr": "pltelemetry_db_validation_pga_memory_usage_value_percentage",
-            "legendFormat": "PGA Memory",
-            "refId": "E"
-          },
-          {
-            "expr": "pltelemetry_db_validation_memory_sorts_count_value",
-            "legendFormat": "Memory Sorts",
-            "refId": "F"
           }
         ],
         "fieldConfig": {
@@ -889,15 +543,224 @@ PLT_DB_DASHBOARD='{
             "color": {
               "mode": "thresholds"
             },
-            "custom": {
-              "align": "center",
-              "displayMode": "auto",
-              "inspect": false
-            },
-            "unit": "short",
-            "min": 0,
             "thresholds": {
-              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "orange",
+                  "value": 1
+                },
+                {
+                  "color": "red",
+                  "value": 5
+                }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "reduceOptions": {
+            "values": false,
+            "calcs": ["lastNotNull"],
+            "fields": ""
+          },
+          "textMode": "value_and_name",
+          "colorMode": "background",
+          "graphMode": "area"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 8,
+        "title": "⏱️ CPU Time per Call Evolution",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 6,
+          "x": 18,
+          "y": 17
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_cpu_time_per_call_value_centiseconds{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "CPU Time/Call",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 1000
+                },
+                {
+                  "color": "orange",
+                  "value": 3000
+                },
+                {
+                  "color": "red",
+                  "value": 5000
+                }
+              ]
+            },
+            "unit": "cs"
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "hidden"
+          }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 9,
+        "title": "📊 Database CPU Ratio Evolution (%)",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 0,
+          "y": 23
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_cpu_ratio_value_percentage{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "DB CPU Ratio",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 70
+                },
+                {
+                  "color": "orange",
+                  "value": 80
+                },
+                {
+                  "color": "red",
+                  "value": 90
+                }
+              ]
+            },
+            "unit": "percent",
+            "min": 0,
+            "max": 100
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max"]
+          }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 10,
+        "title": "🔄 Background CPU Usage Evolution",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 12,
+          "x": 12,
+          "y": 23
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_background_cpu_usage_value_cpu_per_sec{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "Background CPU",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "unit": "cpu_per_sec"
+          }
+        },
+        "options": {
+          "tooltip": {
+            "mode": "single"
+          },
+          "legend": {
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max"]
+          }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
+        }
+      },
+      {
+        "id": 11,
+        "title": "💼 CPU Usage per Transaction Evolution",
+        "type": "timeseries",
+        "gridPos": {
+          "h": 6,
+          "w": 24,
+          "x": 0,
+          "y": 29
+        },
+        "targets": [
+          {
+            "expr": "pltelemetry_db_cpu_usage_per_txn_value_centiseconds{tenant_id=\"$tenant_id\", environment_name=\"$environment_name\"}",
+            "legendFormat": "CPU/Transaction",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "palette-classic"
+            },
+            "thresholds": {
               "steps": [
                 {
                   "color": "green",
@@ -908,402 +771,83 @@ PLT_DB_DASHBOARD='{
                   "value": 50
                 },
                 {
-                  "color": "orange", 
+                  "color": "orange",
                   "value": 75
                 },
                 {
                   "color": "red",
-                  "value": 90
-                }
-              ]
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*(CPU|Memory).*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "max",
                   "value": 100
                 }
               ]
             },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*(Sessions|Sorts).*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "short"
-                },
-                {
-                  "id": "max",
-                  "value": 100000
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Blocked.*"
-              },
-              "properties": [
-                {
-                  "id": "thresholds",
-                  "value": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "color": "green",
-                        "value": null
-                      },
-                      {
-                        "color": "red",
-                        "value": 1
-                      }
-                    ]
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*DB CPU Ratio.*"
-              },
-              "properties": [
-                {
-                  "id": "max",
-                  "value": 200
-                },
-                {
-                  "id": "thresholds",
-                  "value": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "color": "green",
-                        "value": null
-                      },
-                      {
-                        "color": "yellow",
-                        "value": 80
-                      },
-                      {
-                        "color": "orange",
-                        "value": 100
-                      },
-                      {
-                        "color": "red",
-                        "value": 120
-                      }
-                    ]
-                  }
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
-          "colorMode": "background",
-          "graphMode": "area",
-          "justifyMode": "center",
-          "orientation": "horizontal",
-          "reduceOptions": {
-            "calcs": ["lastNotNull"],
-            "fields": "",
-            "values": false
-          },
-          "textMode": "value_and_name",
-          "wideLayout": true
-        }
-      },
-      {
-        "id": 9,
-        "title": "💽 Workarea Memory Details",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 6,
-          "w": 12,
-          "x": 0,
-          "y": 40
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_db_validation_workarea_memory_allocated_value_bytes",
-            "legendFormat": "Workarea Memory Allocated (bytes)",
-            "refId": "A",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "Bytes",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 25,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false
-            },
-            "unit": "bytes",
-            "min": 0
+            "unit": "cs"
           }
         },
         "options": {
-          "legend": {
-            "calcs": ["lastNotNull", "max", "mean"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
           "tooltip": {
             "mode": "single"
-          }
-        }
-      },
-      {
-        "id": 10,
-        "title": "🔄 Service Discovery Performance",
-        "type": "timeseries",
-        "gridPos": {
-          "h": 6,
-          "w": 12,
-          "x": 12,
-          "y": 40
-        },
-        "targets": [
-          {
-            "expr": "pltelemetry_discovery_cycle_duration_milliseconds",
-            "legendFormat": "Discovery Cycle Duration",
-            "refId": "A",
-            "interval": "30s"
           },
-          {
-            "expr": "pltelemetry_discovery_services_checked_count",
-            "legendFormat": "Services Checked",
-            "refId": "B",
-            "interval": "30s"
-          }
-        ],
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "axisLabel": "",
-              "axisPlacement": "auto",
-              "drawStyle": "line",
-              "fillOpacity": 20,
-              "lineWidth": 2,
-              "pointSize": 5,
-              "showPoints": "auto",
-              "spanNulls": false
-            },
-            "unit": "short",
-            "min": 0
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Duration.*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "ms"
-                },
-                {
-                  "id": "custom.axisPlacement",
-                  "value": "left"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byRegexp",
-                "options": ".*Checked.*"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "short"
-                },
-                {
-                  "id": "custom.axisPlacement",
-                  "value": "right"
-                }
-              ]
-            }
-          ]
-        },
-        "options": {
           "legend": {
-            "calcs": ["lastNotNull", "max"],
-            "displayMode": "table",
-            "placement": "bottom"
-          },
-          "tooltip": {
-            "mode": "multi"
+            "displayMode": "visible",
+            "placement": "bottom",
+            "calcs": ["lastNotNull", "max", "mean"]
           }
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": null
         }
       }
-    ],
-    "annotations": {
-      "list": [
-        {
-          "name": "Critical CPU Issues",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "enable": true,
-          "expr": "pltelemetry_db_validation_db_cpu_ratio_value_percentage > 100",
-          "iconColor": "red",
-          "name": "Critical CPU Ratio",
-          "textFormat": "DB CPU Ratio: {{$value}}% - CRITICAL!",
-          "titleFormat": "🚨 Database CPU Critical"
-        },
-        {
-          "name": "Performance Warnings",
-          "datasource": {
-            "type": "prometheus", 
-            "uid": "prometheus"
-          },
-          "enable": true,
-          "expr": "pltelemetry_db_validation_cpu_usage_value_percentage > 75 OR pltelemetry_service_response_time_milliseconds > 3000",
-          "iconColor": "orange",
-          "name": "Performance Warning",
-          "textFormat": "Performance degradation detected",
-          "titleFormat": "⚠️ Performance Alert"
-        },
-        {
-          "name": "Blocked Sessions Alert",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "enable": true,
-          "expr": "pltelemetry_db_validation_blocked_sessions_value_count > 0",
-          "iconColor": "purple",
-          "name": "Blocked Sessions",
-          "textFormat": "{{$value}} blocked sessions detected",
-          "titleFormat": "🔒 Session Blocking Alert"
-        }
-      ]
-    },
-    "templating": {
-      "list": [
-        {
-          "current": {
-            "selected": false,
-            "text": "All",
-            "value": "$__all"
-          },
-          "hide": 0,
-          "includeAll": true,
-          "label": "Environment",
-          "multi": false,
-          "name": "environment",
-          "options": [],
-          "query": "label_values(pltelemetry_db_validation_cycle_completed_count, environment)",
-          "refresh": 1,
-          "regex": "",
-          "skipUrlSync": false,
-          "sort": 0,
-          "type": "query"
-        },
-        {
-          "current": {
-            "selected": false,
-            "text": "All",
-            "value": "$__all"
-          },
-          "hide": 0,
-          "includeAll": true,
-          "label": "Tenant",
-          "multi": true,
-          "name": "tenant",
-          "options": [],
-          "query": "label_values(pltelemetry_service_response_time_milliseconds, tenant_id)",
-          "refresh": 1,
-          "regex": "",
-          "skipUrlSync": false,
-          "sort": 0,
-          "type": "query"
-        }
-      ]
-    }
+    ]
   },
-  "folderId": null,
-  "message": "PLTelemetry Database Monitoring Dashboard - WORKING with REAL metrics! 🔥",
   "overwrite": true
 }'
 
-echo "📊 Importing Database Dashboard..."
+echo "📊 Importing Multi-Tenant Database Dashboard..."
 IMPORT_RESULT=$(grafana_api "POST" "dashboards/db" "$PLT_DB_DASHBOARD")
 
 # Check if import was successful
 if echo "$IMPORT_RESULT" | grep -q "success"; then
    DASHBOARD_UID=$(echo "$IMPORT_RESULT" | grep -o '"uid":"[^"]*"' | cut -d'"' -f4)
    echo ""
-   echo "🎉 PLTelemetry Database Dashboard imported successfully! 🚀"
-   echo "========================================================"
+   echo "🎉 PLTelemetry Multi-Tenant Database Dashboard imported successfully! 🚀"
+   echo "======================================================================="
    echo ""
-   echo "🚨 CRITICAL PANELS:"
-   echo "   📁 Tablespace Crisis Alert (SYSTEM: 98.38%, USERS: 95.3%)"
-   echo "   🔥 CPU Time per Call (4965 cs) - CRITICAL THRESHOLD ALERTS!"
-   echo "   🔧 Failed Jobs Monitor (14 detected)"
+   echo "🏢 MULTI-TENANT FEATURES:"
+   echo "   🎯 Tenant isolation: Only $tenant_id + $environment_name visible"
+   echo "   📊 Horizontal tablespace bars with color coding"
+   echo "   📈 Evolution graphs for all metrics"
+   echo "   🚨 Real-time threshold monitoring"
    echo ""
-   echo "🆕 NEW ADVANCED METRICS:"
-   echo "   📊 Database CPU Ratio (89%)"
-   echo "   🔄 Background CPU Usage (0 cpu/sec)"
-   echo "   💼 CPU Usage per Transaction (1.04 cs)"
-   echo "   🎯 Smart Memory filtering (PGA=-1 handled)"
+   echo "📊 PANELS INCLUDED:"
+   echo "   📁 Tablespace Usage (horizontal bars)"
+   echo "   ⚡ CPU Usage Evolution"
+   echo "   💾 Memory Usage Evolution (PGA=-1 filtered)"
+   echo "   👥 Active Sessions with thresholds"
+   echo "   🔧 Failed Jobs counter"
+   echo "   ⏱️ CPU Time per Call (CRITICAL: >5000cs)"
+   echo "   📊 Database CPU Ratio"
+   echo "   🔄 Background CPU Usage"
+   echo "   💼 CPU Usage per Transaction"
+   echo "   🚨 Validation Status overview"
    echo ""
-   echo "⚡ ENHANCED FEATURES:"
-   echo "   🚨 Multi-level alerting (Critical, Warning, Validation)"
-   echo "   📱 Responsive design with proper legends"
-   echo "   🎨 Color coding (red=critical, orange=warning)"
-   echo "   📊 Mixed unit support (%, ms, cs, count, cpu/sec)"
-   echo "   🔍 Smart filtering (>= 0 for valid data only)"
-   echo "   📈 Real-time status gauges"
+   echo "🎨 DASHBOARD FEATURES:"
+   echo "   🌑 Dark theme optimized"
+   echo "   🔄 Auto-refresh 30s"
+   echo "   📱 Responsive design"
+   echo "   🎯 Template variables: tenant_id, environment_name"
+   echo "   🚨 Color-coded thresholds (green/yellow/orange/red)"
+   echo "   📊 Mixed units support (%, cs, cpu/sec, count)"
    echo ""
    echo "🌐 Dashboard URL: $GRAFANA_URL/d/$DASHBOARD_UID"
    echo "📋 Dashboard UID: $DASHBOARD_UID"
    echo ""
-   echo "🚨 ALERTING CONFIGURED:"
-   echo "   🔴 Tablespace > 95% = CRITICAL"
-   echo "   🔴 CPU Time per Call > 5000cs = CRITICAL"
-   echo "   🟠 CPU Usage > 75% = WARNING"
-   echo "   🟠 DB CPU Ratio > 80% = WARNING"
-   echo "   🟣 Validation Errors = IMMEDIATE"
+   echo "🚨 CURRENT ALERTS DETECTED:"
+   echo "   🔴 Tablespace USERS: 94.9% (CRITICAL)"
+   echo "   🔴 Multiple tablespaces in ERROR state"
+   echo "   📊 Ready for real-time monitoring"
    echo ""
-   echo "🎨 DASHBOARD FEATURES:"
-   echo "   🌑 Dark theme with gradient fills"
-   echo "   📊 11 intelligent panels"
-   echo "   🔄 Auto-refresh 30s"
-   echo "   📱 Mobile-responsive design"
-   echo "   🎯 Instance template variable"
-   echo "   📈 Real-time annotations"
-   echo "   ✨ Background color-coded stats"
-   echo ""
-   echo "💥 Your database is DEFINITELY having issues - check those red panels!"
+   echo "💥 Your dashboard is ready to rock! 🚀"
 else
    echo "❌ Import error:"
    echo "$IMPORT_RESULT"

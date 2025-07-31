@@ -1,465 +1,469 @@
 -- =============================================================================
--- PLT_DB_MONITOR.PKB - FIXED INFINITE LOOP VERSION 
--- Critical architectural fixes to prevent recursive calls
+-- PLT_DB_MONITOR - TENANT-AWARE PACKAGE BODY
+-- Version: 2.0.0 - Multi-Tenant Edition with PLTelemetry Integration
 -- =============================================================================
 
-CREATE OR REPLACE PACKAGE BODY PLT_DB_MONITOR AS
-
-    -- Global configuration flags
-    g_telemetry_configured BOOLEAN := FALSE;
-    g_debug_mode BOOLEAN := TRUE; -- HARDCODED DEBUG FOR DEMO
+CREATE OR REPLACE PACKAGE BODY PLT_DB_MONITOR
+AS
+    /**
+     * PLT_DB_MONITOR - Tenant-Aware Database Monitoring Package Body
+     * 
+     * All validations now operate within tenant context automatically.
+     * Metrics and logs are enriched with tenant_id and environment_name.
+     * Complete integration with PLTelemetry for observability.
+     */
 
     --------------------------------------------------------------------------
-    -- PRIVATE HELPER FUNCTIONS
+    -- PRIVATE VARIABLES
+    --------------------------------------------------------------------------
+    
+    -- Cache for tenant context to avoid repeated queries
+    g_cached_context t_tenant_context;
+    g_context_cache_time TIMESTAMP;
+    g_cache_validity_minutes CONSTANT NUMBER := 5; -- Cache for 5 minutes
+
+    --------------------------------------------------------------------------
+    -- PRIVATE UTILITY FUNCTIONS
     --------------------------------------------------------------------------
 
     /**
-     * Debug output wrapper - only outputs when debug mode is enabled
+     * Log internal errors with tenant context
      */
-    PROCEDURE debug_output(p_message VARCHAR2) IS
-    BEGIN
-        IF g_debug_mode THEN
-            DBMS_OUTPUT.PUT_LINE(p_message);
-        END IF;
-    END debug_output;
-
-    /**
-     * Set debug mode for troubleshooting - PUBLIC PROCEDURE
-     */
-    PROCEDURE set_debug_mode(p_enabled BOOLEAN DEFAULT FALSE) IS
-    BEGIN
-        g_debug_mode := p_enabled;
-        debug_output('🔧 PLT_DB_MONITOR debug mode: ' || CASE WHEN p_enabled THEN 'ENABLED' ELSE 'DISABLED' END);
-    END set_debug_mode;
-
-    /**
-     * Evaluate validation status based on thresholds
-     */
-    FUNCTION evaluate_validation_status(
-        p_current_value NUMBER,
-        p_warning_threshold NUMBER,
-        p_critical_threshold NUMBER,
-        p_validation_type VARCHAR2
-    ) RETURN t_validation_status IS
-    BEGIN
-        -- Certificate expiration uses inverted logic (lower values are worse)
-        IF p_validation_type = 'CERT_EXPIRATION' THEN
-            IF p_current_value <= p_critical_threshold THEN
-                RETURN C_CRITICAL;
-            ELSIF p_current_value <= p_warning_threshold THEN
-                RETURN C_WARNING;
-            ELSE
-                RETURN C_OK;
-            END IF;
-        ELSE
-            -- Normal logic (higher values are worse)
-            IF p_current_value >= p_critical_threshold THEN
-                RETURN C_CRITICAL;
-            ELSIF p_current_value >= p_warning_threshold THEN
-                RETURN C_WARNING;
-            ELSE
-                RETURN C_OK;
-            END IF;
-        END IF;
-    END evaluate_validation_status;
-
-    /**
-     * Create validation-specific attributes for metrics
-     */
-    FUNCTION create_validation_attributes(
-        p_validation_type VARCHAR2,
-        p_instance_name VARCHAR2,
-        p_target_identifier VARCHAR2,
-        p_environment VARCHAR2
-    ) RETURN PLTelemetry.t_attributes IS
+    PROCEDURE log_error_internal(
+        p_module VARCHAR2,
+        p_error_message VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    )
+    IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+        l_context t_tenant_context;
         l_attrs PLTelemetry.t_attributes;
-        l_idx NUMBER := 1;
     BEGIN
-        l_attrs(l_idx) := PLTelemetry.add_attribute('validation_type', p_validation_type);
-        l_idx := l_idx + 1;
-        
-        l_attrs(l_idx) := PLTelemetry.add_attribute('instance_name', p_instance_name);
-        l_idx := l_idx + 1;
-        
-        l_attrs(l_idx) := PLTelemetry.add_attribute('target_identifier', p_target_identifier);
-        l_idx := l_idx + 1;
-        
-        l_attrs(l_idx) := PLTelemetry.add_attribute('environment', p_environment);
-        
-        RETURN l_attrs;
-    END create_validation_attributes;
+        -- Get tenant context for error logging
+        BEGIN
+            l_context := detect_tenant_context();
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_context.tenant_id := 'UNKNOWN';
+                l_context.environment_name := 'UNKNOWN';
+        END;
+
+        -- Build attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('module.name', p_module);
+        l_attrs(4) := PLTelemetry.add_attribute('db.name', SYS_CONTEXT('USERENV', 'DB_NAME'));
+
+        -- Log to PLTelemetry with tenant context
+        IF p_trace_id IS NOT NULL THEN
+            PLTelemetry.log_with_trace(p_trace_id, 'ERROR', p_error_message, l_attrs);
+        ELSE
+            PLTelemetry.log_message('ERROR', p_error_message, l_attrs);
+        END IF;
+
+        -- Also log to plt_telemetry_errors table as backup
+        INSERT INTO plt_telemetry_errors (
+            error_time,
+            error_message,
+            module_name,
+            trace_id
+        ) VALUES (
+            SYSTIMESTAMP,
+            SUBSTR('[' || l_context.tenant_id || '/' || l_context.environment_name || '] ' || p_error_message, 1, 4000),
+            SUBSTR(p_module, 1, 100),
+            p_trace_id
+        );
+        COMMIT;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            NULL; -- Never let error logging break the monitoring
+    END log_error_internal;
 
     /**
-     * Generate validation status message
+     * Get cached tenant context or refresh if expired
      */
-    FUNCTION generate_status_message(
-        p_validation_type VARCHAR2,
-        p_target_identifier VARCHAR2,
-        p_current_value NUMBER,
-        p_threshold_unit VARCHAR2,
-        p_status t_validation_status
-    ) RETURN VARCHAR2 IS
+    FUNCTION get_cached_tenant_context RETURN t_tenant_context
+    IS
+        l_context t_tenant_context;
     BEGIN
-        RETURN p_validation_type || ' for ' || p_target_identifier || 
-               ' is ' || p_status || ' with value ' || 
-               TO_CHAR(p_current_value, '999999.99') || ' ' || p_threshold_unit;
-    END generate_status_message;
-
-    /**
-     * FIXED: Load validation runtime configuration - NO MORE DUPLICATES!
-     */
-    FUNCTION load_validation_runtime(
-        p_instance_name VARCHAR2,
-        p_environment_name VARCHAR2
-    ) RETURN t_validation_runtime IS
-        l_runtime t_validation_runtime;
-    BEGIN
-        debug_output('🔍 Loading runtime for: ' || p_instance_name || ' in ' || p_environment_name);
+        -- Check if cache is still valid
+        IF g_context_cache_time IS NULL OR 
+           SYSTIMESTAMP > g_context_cache_time + (g_cache_validity_minutes / 1440) THEN
+            
+            -- Refresh cache
+            SELECT tenant_id, environment_name, instance_identifier
+            INTO l_context.tenant_id, l_context.environment_name, l_context.instance_identifier
+            FROM plt_db_monitor_config
+            WHERE is_active = 1
+            AND ROWNUM = 1;
+            
+            g_cached_context := l_context;
+            g_context_cache_time := SYSTIMESTAMP;
+        END IF;
         
-        -- FIXED: More deterministic query with explicit ordering and proper INTO clause
-        SELECT 
-            instance_id,
-            validation_type_code,
-            instance_name,
-            target_identifier,
-            is_enabled,
-            validation_procedure,
-            environment_name,
-            warning_threshold,
-            critical_threshold,
-            threshold_unit,
-            check_interval_minutes,
-            last_check_time,
-            last_check_status,
-            last_check_value,
-            consecutive_failures
-        INTO 
-            l_runtime.instance_id,
-            l_runtime.validation_type_code,
-            l_runtime.instance_name,
-            l_runtime.target_identifier,
-            l_runtime.is_enabled,
-            l_runtime.validation_procedure,
-            l_runtime.environment_name,
-            l_runtime.warning_threshold,
-            l_runtime.critical_threshold,
-            l_runtime.threshold_unit,
-            l_runtime.check_interval_minutes,
-            l_runtime.last_check_time,
-            l_runtime.last_check_status,
-            l_runtime.last_check_value,
-            l_runtime.consecutive_failures
-        FROM (
-            SELECT 
-                i.instance_id,
-                i.validation_type_code,
-                i.instance_name,
-                i.target_identifier,
-                i.is_enabled,
-                t.validation_procedure,
-                r.environment_name,
-                r.warning_threshold,
-                r.critical_threshold,
-                r.threshold_unit,
-                r.check_interval_minutes,
-                i.last_check_time,
-                i.last_check_status,
-                i.last_check_value,
-                i.consecutive_failures
-            FROM db_validation_instances i
-            JOIN db_validation_types t ON i.validation_type_code = t.validation_type_code
-            JOIN db_validation_rules r ON i.validation_type_code = r.validation_type_code 
-                                       AND r.environment_name = p_environment_name
-            WHERE i.instance_name = p_instance_name
-              AND r.is_enabled = 1
-              AND t.is_active = 1
-            ORDER BY i.instance_id -- FIXED: Deterministic ordering
-        ) WHERE ROWNUM = 1;
-        debug_output('✅ Runtime loaded - Procedure: ' || l_runtime.validation_procedure);
-        RETURN l_runtime;
+        RETURN g_cached_context;
         
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
-            debug_output('❌ No data found for: ' || p_instance_name || ' (' || p_environment_name || ')');
-            RAISE_APPLICATION_ERROR(-20001, 'Validation instance not found or not configured for environment: ' || 
-                                   p_instance_name || ' (' || p_environment_name || ')');
+            -- No configuration found - return default
+            l_context.tenant_id := 'UNCONFIGURED';
+            l_context.environment_name := 'UNKNOWN';
+            l_context.instance_identifier := SYS_CONTEXT('USERENV', 'DB_NAME');
+            RETURN l_context;
         WHEN OTHERS THEN
-            debug_output('💥 Unexpected error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-            RAISE_APPLICATION_ERROR(-20002, 'Error loading validation runtime: ' || 
-                                   SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
-    END load_validation_runtime;
+            log_error_internal('get_cached_tenant_context', 
+                'Failed to get tenant context: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            -- Return safe fallback
+            l_context.tenant_id := 'ERROR';
+            l_context.environment_name := 'ERROR';
+            l_context.instance_identifier := 'ERROR';
+            RETURN l_context;
+    END get_cached_tenant_context;
 
-    -- ========================================================================
-    -- FIXED: SIMPLIFIED VALIDATION EXECUTOR - NO MORE RECURSION!
-    -- ========================================================================
-    
-    /**
-     * FIXED: Execute a validation query directly with runtime config + FULL TELEMETRY
-     */
-    FUNCTION execute_validation_query(
-        p_runtime t_validation_runtime,
-        p_validation_query VARCHAR2,
-        p_trace_id VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_result t_validation_result;
-        l_start_time TIMESTAMP := SYSTIMESTAMP;
-        l_current_value NUMBER;
-        l_span_id VARCHAR2(16);
-        l_metric_attrs PLTelemetry.t_attributes;
+    --------------------------------------------------------------------------
+    -- TENANT CONTEXT MANAGEMENT IMPLEMENTATION
+    --------------------------------------------------------------------------
+
+    FUNCTION detect_tenant_context RETURN t_tenant_context
+    IS
     BEGIN
-        debug_output('🔍 EXECUTING DIRECT QUERY FOR: ' || p_runtime.validation_type_code);
-        debug_output('📊 TARGET: ' || p_runtime.target_identifier);
-        debug_output('🔧 QUERY: ' || p_validation_query);
+        RETURN get_cached_tenant_context();
+    END detect_tenant_context;
 
-        -- START TELEMETRY SPAN
-        IF p_trace_id IS NOT NULL THEN
-            l_span_id := PLTelemetry.continue_distributed_trace(
-                p_trace_id => p_trace_id,
-                p_operation => 'execute_query_' || p_runtime.validation_type_code
-            );
-        ELSE
-            l_span_id := PLTelemetry.start_span('execute_validation_query');
-        END IF;
+    FUNCTION get_current_tenant_id RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN get_cached_tenant_context().tenant_id;
+    END get_current_tenant_id;
 
-        -- Initialize result from runtime
-        l_result.validation_type_code := p_runtime.validation_type_code;
-        l_result.instance_name := p_runtime.instance_name;
-        l_result.target_identifier := p_runtime.target_identifier;
-        l_result.warning_threshold := p_runtime.warning_threshold;
-        l_result.critical_threshold := p_runtime.critical_threshold;
-        l_result.threshold_unit := p_runtime.threshold_unit;
-        l_result.check_timestamp := SYSTIMESTAMP;
+    FUNCTION get_current_environment_name RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN get_cached_tenant_context().environment_name;
+    END get_current_environment_name;
 
-        -- Add span attributes for validation context
+    FUNCTION get_current_instance_identifier RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN get_cached_tenant_context().instance_identifier;
+    END get_current_instance_identifier;
+
+    PROCEDURE update_tenant_context(
+        p_tenant_id VARCHAR2,
+        p_environment_name VARCHAR2,
+        p_instance_identifier VARCHAR2 DEFAULT NULL,
+        p_description VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_instance_id VARCHAR2(100);
+        l_description VARCHAR2(200);
+    BEGIN
+        -- Default instance identifier
+        l_instance_id := NVL(p_instance_identifier, 
+            SYS_CONTEXT('USERENV', 'DB_NAME') || '_' || SYS_CONTEXT('USERENV', 'INSTANCE_NAME'));
+        
+        -- Default description
+        l_description := NVL(p_description, 
+            'Updated for ' || p_tenant_id || ' ' || p_environment_name || ' environment');
+
+        -- Update or insert configuration
+        MERGE INTO plt_db_monitor_config c
+        USING (SELECT p_tenant_id as tenant_id, p_environment_name as environment_name FROM dual) src
+        ON (c.tenant_id = src.tenant_id AND c.environment_name = src.environment_name)
+        WHEN MATCHED THEN
+            UPDATE SET 
+                instance_identifier = l_instance_id,
+                description = l_description,
+                updated_at = SYSTIMESTAMP,
+                is_active = 1
+        WHEN NOT MATCHED THEN
+            INSERT (tenant_id, environment_name, instance_identifier, description, is_active)
+            VALUES (p_tenant_id, p_environment_name, l_instance_id, l_description, 1);
+
+        -- Clear cache to force refresh
+        g_context_cache_time := NULL;
+        
+        COMMIT;
+
+        -- Log the configuration change
         DECLARE
             l_attrs PLTelemetry.t_attributes;
         BEGIN
-            l_attrs(1) := PLTelemetry.add_attribute('validation.type', p_runtime.validation_type_code);
-            l_attrs(2) := PLTelemetry.add_attribute('validation.target', p_runtime.target_identifier);
-            l_attrs(3) := PLTelemetry.add_attribute('validation.warning_threshold', TO_CHAR(p_runtime.warning_threshold));
-            l_attrs(4) := PLTelemetry.add_attribute('validation.critical_threshold', TO_CHAR(p_runtime.critical_threshold));
-            PLTelemetry.add_event(l_span_id, 'validation_query_started', l_attrs);
+            l_attrs(1) := PLTelemetry.add_attribute('tenant.id', p_tenant_id);
+            l_attrs(2) := PLTelemetry.add_attribute('environment.name', p_environment_name);
+            l_attrs(3) := PLTelemetry.add_attribute('instance.identifier', l_instance_id);
+            
+            PLTelemetry.log_message('INFO', 
+                'Tenant context updated for database monitoring', l_attrs);
         END;
-
-        -- Execute the validation query with timeout protection
-        BEGIN
-            -- FIXED: Add explicit timeout and bind variable handling
-            IF INSTR(p_validation_query, ':1') > 0 THEN
-                debug_output('🔗 Using bind variable: ' || p_runtime.target_identifier);
-                
-                -- FIXED: Use DBMS_SQL for better timeout control
-                DECLARE
-                    l_cursor INTEGER;
-                    l_rows INTEGER;
-                BEGIN
-                    l_cursor := DBMS_SQL.OPEN_CURSOR;
-                    DBMS_SQL.PARSE(l_cursor, p_validation_query, DBMS_SQL.NATIVE);
-                    DBMS_SQL.BIND_VARIABLE(l_cursor, ':1', p_runtime.target_identifier);
-                    DBMS_SQL.DEFINE_COLUMN(l_cursor, 1, l_current_value);
-                    
-                    l_rows := DBMS_SQL.EXECUTE(l_cursor);
-                    IF DBMS_SQL.FETCH_ROWS(l_cursor) > 0 THEN
-                        DBMS_SQL.COLUMN_VALUE(l_cursor, 1, l_current_value);
-                    ELSE
-                        l_current_value := 0;
-                    END IF;
-                    
-                    DBMS_SQL.CLOSE_CURSOR(l_cursor);
-                EXCEPTION
-                    WHEN OTHERS THEN
-                        IF DBMS_SQL.IS_OPEN(l_cursor) THEN
-                            DBMS_SQL.CLOSE_CURSOR(l_cursor);
-                        END IF;
-                        RAISE;
-                END;
-            ELSE
-                debug_output('🚫 No bind variables needed');
-                EXECUTE IMMEDIATE p_validation_query INTO l_current_value;
-            END IF;
-            
-            debug_output('✅ SUCCESS: Got value = ' || l_current_value);
-            
-            l_result.current_value := l_current_value;
-            
-            -- Evaluate status
-            l_result.status := evaluate_validation_status(
-                l_current_value,
-                p_runtime.warning_threshold,
-                p_runtime.critical_threshold,
-                p_runtime.validation_type_code
-            );
-            
-            l_result.status_message := generate_status_message(
-                p_runtime.validation_type_code,
-                p_runtime.target_identifier,
-                l_current_value,
-                p_runtime.threshold_unit,
-                l_result.status
-            );
-
-            -- SUCCESS TELEMETRY
-            PLTelemetry.add_event(l_span_id, 'validation_query_success');
-
-        EXCEPTION
-            WHEN NO_DATA_FOUND THEN
-                debug_output('❌ NO_DATA_FOUND: Target not found: ' || p_runtime.target_identifier);
-                l_result.status := C_ERROR;
-                l_result.error_details := 'Target not found: ' || p_runtime.target_identifier;
-                l_result.current_value := 0;
-                
-                -- ERROR TELEMETRY
-                PLTelemetry.add_event(l_span_id, 'validation_query_no_data_found');
-                
-            WHEN OTHERS THEN
-                debug_output('💥 QUERY ERROR: ' || SQLCODE || ' - ' || SQLERRM);
-                debug_output('🔧 Failed Query: ' || SUBSTR(p_validation_query, 1, 200));
-                debug_output('📍 Target: ' || p_runtime.target_identifier);
-                
-                l_result.status := C_ERROR;
-                l_result.error_details := 'Query error: ' || 
-                    SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
-                l_result.current_value := -1;
-
-                -- ERROR TELEMETRY
-                DECLARE
-                    l_error_attrs PLTelemetry.t_attributes;
-                BEGIN
-                    l_error_attrs(1) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
-                    l_error_attrs(2) := PLTelemetry.add_attribute('error.message', SUBSTR(SQLERRM, 1, 200));
-                    l_error_attrs(3) := PLTelemetry.add_attribute('query.failed', SUBSTR(p_validation_query, 1, 200));
-                    PLTelemetry.add_event(l_span_id, 'validation_query_error', l_error_attrs);
-                END;
-        END;
-
-        -- Calculate response time
-        l_result.response_time_ms := EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000;
-
-        -- GENERATE TELEMETRY METRICS
-        l_metric_attrs := create_validation_attributes(
-            p_validation_type => p_runtime.validation_type_code,
-            p_instance_name => p_runtime.instance_name,
-            p_target_identifier => p_runtime.target_identifier,
-            p_environment => p_runtime.environment_name
-        );
-
-        -- Core validation metrics
-        PLTelemetry.log_metric(
-            p_metric_name => 'db_validation_' || LOWER(p_runtime.validation_type_code) || '_value',
-            p_value => NVL(l_result.current_value, -1),
-            p_unit => p_runtime.threshold_unit,
-            p_attributes => l_metric_attrs,
-            p_include_trace_correlation => FALSE
-        );
-
-        PLTelemetry.log_metric(
-            p_metric_name => 'db_validation_status_gauge',
-            p_value => CASE l_result.status 
-                        WHEN C_OK THEN 1
-                        WHEN C_WARNING THEN 0.5
-                        WHEN C_CRITICAL THEN 0
-                        ELSE -1
-                       END,
-            p_unit => 'status',
-            p_attributes => l_metric_attrs,
-            p_include_trace_correlation => FALSE
-        );
-
-        PLTelemetry.log_metric(
-            p_metric_name => 'db_validation_response_time_ms',
-            p_value => l_result.response_time_ms,
-            p_unit => 'milliseconds',
-            p_attributes => l_metric_attrs,
-            p_include_trace_correlation => FALSE
-        );
-
-        debug_output('✅ Direct query result: ' || l_result.status || ' = ' || l_result.current_value);
-        
-        -- END TELEMETRY SPAN
-        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status IN (C_OK, C_WARNING) THEN 'OK' ELSE 'ERROR' END);
-        
-        RETURN l_result;
 
     EXCEPTION
         WHEN OTHERS THEN
-            l_result.status := C_ERROR;
-            l_result.error_details := 'Critical validation failure: ' || 
-                                     SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
-            l_result.current_value := -1;
-            l_result.response_time_ms := EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000;
+            log_error_internal('update_tenant_context', 
+                'Failed to update tenant context: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END update_tenant_context;
+
+    --------------------------------------------------------------------------
+    -- VALIDATION ORCHESTRATOR IMPLEMENTATION
+    --------------------------------------------------------------------------
+
+    PROCEDURE perform_database_validations(
+        p_force_all_checks BOOLEAN DEFAULT FALSE,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_trace_id VARCHAR2(32);
+        l_span_id VARCHAR2(16);
+        l_context t_tenant_context;
+        l_validation_count NUMBER := 0;
+        l_error_count NUMBER := 0;
+        l_attrs PLTelemetry.t_attributes;
+        
+        -- Cursor for enabled validation instances
+        CURSOR c_validations IS
+            SELECT DISTINCT 
+                vi.validation_type_code,
+                vi.instance_name,
+                vi.target_identifier,
+                vt.validation_procedure,
+                vr.check_interval_minutes
+            FROM db_validation_instances vi
+            JOIN db_validation_types vt ON vi.validation_type_code = vt.validation_type_code
+            JOIN db_validation_rules vr ON (
+                vi.validation_type_code = vr.validation_type_code 
+                AND vi.tenant_id = vr.tenant_id 
+                AND vi.environment_name = vr.environment_name
+            )
+            WHERE vi.tenant_id = l_context.tenant_id
+              AND vi.environment_name = l_context.environment_name
+              AND vi.is_enabled = 1
+              AND vt.is_active = 1
+              AND vr.is_enabled = 1;
+    BEGIN
+        -- Get tenant context
+        l_context := detect_tenant_context();
+        
+        -- Start distributed trace
+        l_trace_id := NVL(p_trace_id, PLTelemetry.start_trace('database_validation_cycle'));
+        l_span_id := PLTelemetry.start_span('tenant_validation_orchestrator', NULL, l_trace_id);
+
+        -- Set tenant context in PLTelemetry
+        PLTelemetry.set_tenant_context(l_context.tenant_id, 
+            l_context.tenant_id || ' ' || l_context.environment_name || ' Environment');
+
+        -- Add orchestrator events with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('instance.identifier', l_context.instance_identifier);
+        l_attrs(4) := PLTelemetry.add_attribute('force_all_checks', CASE WHEN p_force_all_checks THEN 'true' ELSE 'false' END);
+        
+        PLTelemetry.add_event(l_span_id, 'validation_cycle_started', l_attrs);
+
+        -- Process each enabled validation
+        FOR rec IN c_validations LOOP
+            BEGIN
+                -- dbms_output.put_line('Processing validation: ' || rec.validation_type_code || ' on instance: ' || rec.instance_name);
+                -- Check if validation is due
+                IF p_force_all_checks OR is_validation_due(rec.validation_type_code, rec.instance_name, p_force_all_checks) THEN
+                    
+                    -- Execute the specific validation
+                    perform_validation_type(rec.validation_type_code, rec.instance_name, l_trace_id);
+                    l_validation_count := l_validation_count + 1;
+                    
+                    -- Add event for each validation executed
+                    l_attrs(1) := PLTelemetry.add_attribute('validation.type', rec.validation_type_code);
+                    l_attrs(2) := PLTelemetry.add_attribute('validation.instance', rec.instance_name);
+                    l_attrs(3) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+                    PLTelemetry.add_event(l_span_id, 'validation_executed', l_attrs);
+                END IF;
+                
+            EXCEPTION
+                WHEN OTHERS THEN
+                    l_error_count := l_error_count + 1;
+                    log_error_internal('perform_database_validations', 
+                        'Validation failed for ' || rec.validation_type_code || '/' || rec.instance_name || 
+                        ': ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                        l_trace_id);
+            END;
+        END LOOP;
+
+        -- Send summary metrics with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('instance.identifier', l_context.instance_identifier);
+        
+        PLTelemetry.log_metric('db_validations_executed', l_validation_count, 'count', l_attrs, FALSE);
+        
+        IF l_error_count > 0 THEN
+            PLTelemetry.log_metric('db_validation_errors', l_error_count, 'count', l_attrs, FALSE);
+        END IF;
+
+        -- Complete the span
+        l_attrs(1) := PLTelemetry.add_attribute('validations.executed', TO_CHAR(l_validation_count));
+        l_attrs(2) := PLTelemetry.add_attribute('validations.errors', TO_CHAR(l_error_count));
+        l_attrs(3) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(4) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        
+        PLTelemetry.add_event(l_span_id, 'validation_cycle_completed', l_attrs);
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_error_count = 0 THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        -- End trace only if we started it
+        IF p_trace_id IS NULL THEN
+            PLTelemetry.end_trace(l_trace_id);
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('perform_database_validations', 
+                'Critical error in validation orchestrator: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                l_trace_id);
             
-            -- ERROR SPAN
+            -- End span with error
             PLTelemetry.end_span(l_span_id, 'ERROR');
-            
-            RETURN l_result;
-    END execute_validation_query;
+            IF p_trace_id IS NULL THEN
+                PLTelemetry.end_trace(l_trace_id);
+            END IF;
+    END perform_database_validations;
 
-    --------------------------------------------------------------------------
-    -- PUBLIC CONFIGURATION PROCEDURES
-    --------------------------------------------------------------------------
-
-    PROCEDURE configure_telemetry IS
-    BEGIN
-        IF NOT g_telemetry_configured THEN
-
-            -- Initialize PLTelemetry failover system
-            --PLTelemetry.initialize_failover_system();
-
-            -- SIMPLIFIED: Minimal telemetry config for demo
-            PLTelemetry.set_backend_url('OTLP_BRIDGE');
-            PLT_OTLP_BRIDGE.set_otlp_collector('http://plt-otel-collector:4318');
-            PLT_OTLP_BRIDGE.set_service_info('oracle-db-monitor', '1.0.0', 'production');
-            PLTelemetry.set_async_mode(TRUE);
-            PLT_OTLP_BRIDGE.set_debug_mode(FALSE);
-            PLT_OTLP_BRIDGE.set_timeout(5);
-            
-            g_telemetry_configured := TRUE;
-            debug_output('✅ Telemetry configured successfully');
-        END IF;
-    EXCEPTION
-        WHEN OTHERS THEN
-            debug_output('⚠️ Telemetry configuration failed, continuing without it');
-            g_telemetry_configured := TRUE; -- Mark as configured to avoid retry loops
-    END configure_telemetry;
-
-    FUNCTION detect_environment RETURN VARCHAR2 IS
-        l_db_name VARCHAR2(50);
-    BEGIN
-        SELECT name INTO l_db_name FROM v$database;
+    PROCEDURE perform_validation_type(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2 DEFAULT NULL,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_span_id VARCHAR2(16);
+        l_context t_tenant_context;
+        l_result t_validation_result;
+        l_attrs PLTelemetry.t_attributes;
         
-        IF UPPER(l_db_name) LIKE '%PROD%' OR UPPER(l_db_name) LIKE '%PRD%' THEN
-            RETURN C_PROD;
-        ELSIF UPPER(l_db_name) LIKE '%TEST%' OR UPPER(l_db_name) LIKE '%TST%' THEN
-            RETURN C_TEST;
-        ELSIF UPPER(l_db_name) LIKE '%DEV%' OR UPPER(l_db_name) LIKE '%DEVEL%' THEN
-            RETURN C_DEV;
-        ELSE
-            RETURN C_TEST; -- Safe default
-        END IF;
+        -- Cursor for instances to validate
+        CURSOR c_instances IS
+            SELECT instance_name, target_identifier
+            FROM db_validation_instances
+            WHERE validation_type_code = p_validation_type_code
+              AND tenant_id = l_context.tenant_id
+              AND environment_name = l_context.environment_name
+              AND is_enabled = 1
+              AND (p_instance_name IS NULL OR instance_name = p_instance_name);
+    BEGIN
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validation_type_' || LOWER(p_validation_type_code), NULL, p_trace_id);
+
+        -- Add validation context
+        l_attrs(1) := PLTelemetry.add_attribute('validation.type', p_validation_type_code);
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        PLTelemetry.add_event(l_span_id, 'validation_type_started', l_attrs);
+
+        -- Execute validation for each matching instance
+        FOR rec IN c_instances LOOP
+            BEGIN
+                -- Call the appropriate validation function based on type
+                CASE p_validation_type_code
+                    WHEN 'TABLESPACE_USAGE' THEN
+                        l_result := validate_tablespace_usage(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'ACTIVE_SESSIONS' THEN
+                        l_result := validate_active_sessions(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'BLOCKED_SESSIONS' THEN
+                        l_result := validate_blocked_sessions(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'INVALID_OBJECTS' THEN
+                        l_result := validate_invalid_objects(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'FAILED_JOBS' THEN
+                        l_result := validate_failed_jobs(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'MEMORY_USAGE' THEN
+                        l_result := validate_memory_usage(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'CPU_USAGE' THEN
+                        l_result := validate_cpu_usage(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'DB_CPU_RATIO' THEN
+                        l_result := validate_database_cpu_ratio(rec.instance_name, rec.target_identifier, p_trace_id);
+                    WHEN 'PGA_MEMORY_USAGE' THEN
+                        l_result := validate_pga_memory_usage(rec.instance_name, rec.target_identifier, p_trace_id);
+                    ELSE
+                        log_error_internal('perform_validation_type', 
+                            'Unknown validation type: ' || p_validation_type_code, p_trace_id);
+                        CONTINUE;
+                END CASE;
+
+                -- Update validation results in database
+                update_validation_result(p_validation_type_code, rec.instance_name, 
+                    l_result.status, l_result.measured_value);
+
+                -- Send metrics to PLTelemetry with tenant context
+                send_validation_metrics(l_result, p_trace_id);
+
+                -- Log validation event
+                log_validation_event(p_validation_type_code, rec.instance_name, 
+                    'validation_completed', l_result.status || ': ' || l_result.message, p_trace_id);
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Update instance with error status
+                    update_validation_result(p_validation_type_code, rec.instance_name, 'ERROR', NULL, 
+                        SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+                    
+                    log_error_internal('perform_validation_type', 
+                        'Validation error for ' || p_validation_type_code || '/' || rec.instance_name || 
+                        ': ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                        p_trace_id);
+            END;
+        END LOOP;
+
+        PLTelemetry.end_span(l_span_id, 'OK', l_attrs);
+
     EXCEPTION
         WHEN OTHERS THEN
-            RETURN C_TEST;
-    END detect_environment;
+            log_error_internal('perform_validation_type', 
+                'Critical error in validation type ' || p_validation_type_code || 
+                ': ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+    END perform_validation_type;
 
-    -- ========================================================================
-    -- FIXED: INDIVIDUAL VALIDATION PROCEDURES - SIMPLIFIED NO RECURSION!
-    -- ========================================================================
+    --------------------------------------------------------------------------
+    -- SPECIFIC VALIDATION IMPLEMENTATIONS
+    --------------------------------------------------------------------------
 
-    /**
-     * FIXED: Tablespace usage - direct execution, no recursion
-     */
     FUNCTION validate_tablespace_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(2000) := q'[
-            SELECT NVL(ROUND(
-                CASE 
-                    WHEN NVL(total_space, 0) = 0 THEN 0
-                    ELSE ((NVL(total_space, 0) - NVL(free_space, 0)) / NVL(total_space, 1)) * 100
-                END, 2), 0) as used_pct
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_used_pct NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
+    BEGIN
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_tablespace_usage', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'TABLESPACE_USAGE';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'TABLESPACE_USAGE'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get tablespace usage percentage
+        BEGIN
+            SELECT ROUND(
+                (1 - (NVL(free_space, 0) / GREATEST(total_space, 1))) * 100, 2
+            ) INTO l_used_pct
             FROM (
                 SELECT 
                     ts.tablespace_name,
@@ -476,999 +480,1293 @@ CREATE OR REPLACE PACKAGE BODY PLT_DB_MONITOR AS
                     FROM dba_free_space
                     GROUP BY tablespace_name
                 ) fs ON ts.tablespace_name = fs.tablespace_name
-                WHERE UPPER(ts.tablespace_name) = UPPER(:1)
-            )
-        ]';
-    BEGIN
-        debug_output('🗂️ TABLESPACE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🗂️ TABLESPACE validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+                WHERE ts.tablespace_name = p_target_identifier
+            );
+
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                l_result.status := 'ERROR';
+                l_result.message := 'Tablespace not found: ' || p_target_identifier;
+                PLTelemetry.end_span(l_span_id, 'ERROR');
+                RETURN l_result;
+        END;
+
+        l_result.measured_value := l_used_pct;
+
+        -- Determine status based on thresholds
+        IF l_used_pct >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Tablespace usage critical: ' || l_used_pct || '% (threshold: ' || l_critical_threshold || '%)';
+        ELSIF l_used_pct >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Tablespace usage warning: ' || l_used_pct || '% (threshold: ' || l_warning_threshold || '%)';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Tablespace usage normal: ' || l_used_pct || '%';
+        END IF;
+
+        -- Add attributes with tenant context for span
+        l_attrs(1) := PLTelemetry.add_attribute('tablespace.name', p_target_identifier);
+        l_attrs(2) := PLTelemetry.add_attribute('usage.percentage', TO_CHAR(l_used_pct));
+        l_attrs(3) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(4) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(5) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_tablespace_usage', 
+                'Error validating tablespace ' || p_target_identifier || 
+                ': ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_tablespace_usage;
 
     FUNCTION validate_active_sessions(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT COUNT(*) 
-            FROM v$session
-            WHERE status = 'ACTIVE' AND type = 'USER'
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_session_count NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('👥 ACTIVE_SESSIONS validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('👥 ACTIVE_SESSIONS validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_active_sessions', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'ACTIVE_SESSIONS';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'ACTIVE_SESSIONS'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get active session count
+        SELECT COUNT(*)
+        INTO l_session_count
+        FROM v$session
+        WHERE status = 'ACTIVE'
+          AND username IS NOT NULL; -- Exclude background processes
+
+        l_result.measured_value := l_session_count;
+
+        -- Determine status based on thresholds
+        IF l_session_count >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Active sessions critical: ' || l_session_count || ' (threshold: ' || l_critical_threshold || ')';
+        ELSIF l_session_count >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Active sessions warning: ' || l_session_count || ' (threshold: ' || l_warning_threshold || ')';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Active sessions normal: ' || l_session_count;
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('sessions.active_count', TO_CHAR(l_session_count));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_active_sessions', 
+                'Error validating active sessions: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_active_sessions;
 
     FUNCTION validate_blocked_sessions(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT COUNT(*)
-            FROM v$session
-            WHERE blocking_session IS NOT NULL AND type = 'USER'
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_blocked_count NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('🚫 BLOCKED_SESSIONS validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🚫 BLOCKED_SESSIONS validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_blocked_sessions', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'BLOCKED_SESSIONS';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'BLOCKED_SESSIONS'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get blocked session count using v$session_wait
+        SELECT COUNT(DISTINCT s.sid)
+        INTO l_blocked_count
+        FROM v$session s
+        JOIN v$session_wait sw ON s.sid = sw.sid
+        WHERE s.blocking_session IS NOT NULL
+          AND s.username IS NOT NULL
+          AND sw.event LIKE '%enq%' OR sw.event LIKE '%lock%';
+
+        l_result.measured_value := l_blocked_count;
+
+        -- Determine status based on thresholds
+        IF l_blocked_count >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Blocked sessions critical: ' || l_blocked_count || ' (threshold: ' || l_critical_threshold || ')';
+        ELSIF l_blocked_count >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Blocked sessions warning: ' || l_blocked_count || ' (threshold: ' || l_warning_threshold || ')';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Blocked sessions normal: ' || l_blocked_count;
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('sessions.blocked_count', TO_CHAR(l_blocked_count));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_blocked_sessions', 
+                'Error validating blocked sessions: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_blocked_sessions;
 
     FUNCTION validate_invalid_objects(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT COUNT(*)
-            FROM dba_objects
-            WHERE status = 'INVALID'
-              AND owner NOT IN ('SYS', 'SYSTEM', 'XDB', 'APEX_030200', 'FLOWS_FILES')
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_invalid_count NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('⚠️ INVALID_OBJECTS validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('⚠️ INVALID_OBJECTS validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_invalid_objects', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'INVALID_OBJECTS';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'INVALID_OBJECTS'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get invalid object count
+        SELECT COUNT(*)
+        INTO l_invalid_count
+        FROM dba_objects
+        WHERE status = 'INVALID'
+          AND owner NOT IN ('SYS', 'SYSTEM', 'DBSNMP', 'WMSYS', 'EXFSYS', 'CTXSYS', 'XDB', 'ANONYMOUS', 'XS$NULL', 'APEX_030200', 'APEX_PUBLIC_USER', 'DIP', 'FLOWS_FILES', 'HR', 'MDSYS', 'ORACLE_OCM', 'ORDPLUGINS', 'ORDSYS', 'OUTLN', 'SI_INFORMTN_SCHEMA');
+
+        l_result.measured_value := l_invalid_count;
+
+        -- Determine status based on thresholds
+        IF l_invalid_count >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Invalid objects critical: ' || l_invalid_count || ' (threshold: ' || l_critical_threshold || ')';
+        ELSIF l_invalid_count >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Invalid objects warning: ' || l_invalid_count || ' (threshold: ' || l_warning_threshold || ')';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Invalid objects normal: ' || l_invalid_count;
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('objects.invalid_count', TO_CHAR(l_invalid_count));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_invalid_objects', 
+                'Error validating invalid objects: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_invalid_objects;
 
     FUNCTION validate_failed_jobs(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT COUNT(*)
-            FROM dba_scheduler_job_run_details
-            WHERE status = 'FAILED'
-              AND log_date > SYSDATE - 1
-              AND owner NOT IN ('SYS', 'SYSTEM', 'ORACLE_OCM')
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_failed_count NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('💼 FAILED_JOBS validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('💼 FAILED_JOBS validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_failed_jobs', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'FAILED_JOBS';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'FAILED_JOBS'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get failed job count from last 24 hours
+        SELECT COUNT(DISTINCT job_name)
+        INTO l_failed_count
+        FROM dba_scheduler_job_run_details
+        WHERE status = 'FAILED'
+          AND log_date > SYSDATE - 1;
+
+        l_result.measured_value := l_failed_count;
+
+        -- Determine status based on thresholds
+        IF l_failed_count >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Failed jobs critical: ' || l_failed_count || ' (threshold: ' || l_critical_threshold || ')';
+        ELSIF l_failed_count >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Failed jobs warning: ' || l_failed_count || ' (threshold: ' || l_warning_threshold || ')';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Failed jobs normal: ' || l_failed_count;
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('jobs.failed_count', TO_CHAR(l_failed_count));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_failed_jobs', 
+                'Error validating failed jobs: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_failed_jobs;
 
     FUNCTION validate_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_sga_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(
-                CASE 
-                    WHEN total_mb = 0 THEN 0
-                    ELSE (used_mb / total_mb) * 100 
-                END, 2), 0) as usage_pct
-            FROM (
-                SELECT 
-                    NVL(MAX(CASE WHEN name = 'Maximum SGA Size' THEN bytes/1024/1024 END), 1) as total_mb,
-                    NVL(SUM(CASE WHEN name IN ('Buffer Cache Size', 'Shared Pool Size', 'Large Pool Size', 'Java Pool Size', 'Streams Pool Size', 'Shared IO Pool Size') 
-                        THEN bytes/1024/1024 ELSE 0 END), 0) as used_mb
-                FROM v$sgainfo
-            )
-        ]';
-        l_pga_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(
-                CASE 
-                    WHEN pga_target_mem = 0 THEN 0
-                    ELSE (pga_used_mem / pga_target_mem) * 100 
-                END, 2), 0) as usage_pct
-            FROM (
-                SELECT 
-                    NVL(MAX(CASE WHEN name = 'aggregate PGA target parameter' THEN value END), 1) as pga_target_mem,
-                    NVL(MAX(CASE WHEN name = 'total PGA allocated' THEN value END), 0) as pga_used_mem
-                FROM v$pgastat
-                WHERE name IN ('aggregate PGA target parameter', 'total PGA allocated')
-            )
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_memory_pct NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('🧠 MEMORY_USAGE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🧠 MEMORY_USAGE validation - Target: ' || l_runtime.target_identifier);
-        
-        IF UPPER(l_runtime.target_identifier) = 'SGA' THEN
-            debug_output('🧠 Using SGA query');
-            RETURN execute_validation_query(l_runtime, l_sga_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_memory_usage', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'MEMORY_USAGE';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'MEMORY_USAGE'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get memory usage based on target type
+        IF UPPER(p_target_identifier) = 'SGA' THEN
+            -- SGA memory usage
+            SELECT ROUND(
+                (SELECT value FROM v$sga WHERE name = 'Variable Size') /
+                (SELECT value FROM v$sga WHERE name = 'Total System Global Area') * 100, 2
+            ) INTO l_memory_pct FROM dual;
+        ELSIF UPPER(p_target_identifier) = 'PGA' THEN
+            -- PGA memory usage - approximate based on available statistics
+            SELECT ROUND(NVL(
+                (SELECT value FROM v$pgastat WHERE name = 'total PGA allocated') /
+                NULLIF((SELECT value FROM v$pgastat WHERE name = 'aggregate PGA target parameter'), 0) * 100,
+                0
+            ), 2) INTO l_memory_pct FROM dual;
         ELSE
-            debug_output('🧠 Using PGA query');
-            RETURN execute_validation_query(l_runtime, l_pga_query, p_trace_id);
+            -- Default to SGA
+            SELECT ROUND(
+                (SELECT SUM(bytes) FROM v$sgastat WHERE pool = 'shared pool') /
+                (SELECT value FROM v$sga WHERE name = 'Total System Global Area') * 100, 2
+            ) INTO l_memory_pct FROM dual;
         END IF;
+
+        l_result.measured_value := l_memory_pct;
+
+        -- Determine status based on thresholds
+        IF l_memory_pct >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'Memory usage critical: ' || l_memory_pct || '% (threshold: ' || l_critical_threshold || '%)';
+        ELSIF l_memory_pct >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'Memory usage warning: ' || l_memory_pct || '% (threshold: ' || l_warning_threshold || '%)';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'Memory usage normal: ' || l_memory_pct || '%';
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('memory.type', p_target_identifier);
+        l_attrs(2) := PLTelemetry.add_attribute('memory.usage_percentage', TO_CHAR(l_memory_pct));
+        l_attrs(3) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(4) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(5) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_memory_usage', 
+                'Error validating memory usage: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_memory_usage;
 
     FUNCTION validate_cpu_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(AVG(value), 2), 0)
-            FROM v$metric
-            WHERE metric_name = 'CPU Usage Per Sec'
-              AND intsize_csec = (SELECT MAX(intsize_csec) FROM v$metric WHERE metric_name = 'CPU Usage Per Sec')
-        ]';
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
+        l_result t_validation_result;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_cpu_pct NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('⚡ CPU_USAGE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('⚡ CPU_USAGE validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_cpu_usage', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'CPU_USAGE';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'CPU_USAGE'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get CPU usage from v$sysmetric (Host CPU Utilization)
+        BEGIN
+            SELECT ROUND(value, 2)
+            INTO l_cpu_pct
+            FROM v$sysmetric
+            WHERE metric_name = 'Host CPU Utilization (%)'
+              AND group_id = 2
+              AND ROWNUM = 1;
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                -- Fallback to database CPU time ratio
+                SELECT ROUND(
+                    (SELECT value FROM v$sysstat WHERE name = 'CPU used by this session') /
+                    NULLIF((SELECT value FROM v$sysstat WHERE name = 'DB time'), 0) * 100,
+                    2
+                ) INTO l_cpu_pct FROM dual;
+        END;
+
+        l_result.measured_value := NVL(l_cpu_pct, 0);
+
+        -- Determine status based on thresholds
+        IF l_cpu_pct >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'CPU usage critical: ' || l_cpu_pct || '% (threshold: ' || l_critical_threshold || '%)';
+        ELSIF l_cpu_pct >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'CPU usage warning: ' || l_cpu_pct || '% (threshold: ' || l_warning_threshold || '%)';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'CPU usage normal: ' || l_cpu_pct || '%';
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('cpu.usage_percentage', TO_CHAR(l_cpu_pct));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
+        
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_cpu_usage', 
+                'Error validating CPU usage: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
     END validate_cpu_usage;
 
     FUNCTION validate_database_cpu_ratio(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(value, 2), 0)
-            FROM v$metric
-            WHERE metric_name = 'Database CPU Time Ratio'
-              AND intsize_csec = (SELECT MAX(intsize_csec) FROM v$metric WHERE metric_name = 'Database CPU Time Ratio')
-              AND ROWNUM = 1
-        ]';
-    BEGIN
-        debug_output('📊 DATABASE_CPU_RATIO validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('📊 DATABASE_CPU_RATIO validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_database_cpu_ratio;
-
-    FUNCTION validate_cpu_usage_per_txn(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(value, 2), 0)
-            FROM v$metric
-            WHERE metric_name = 'CPU Usage Per Txn'
-              AND intsize_csec = (SELECT MAX(intsize_csec) FROM v$metric WHERE metric_name = 'CPU Usage Per Txn')
-              AND ROWNUM = 1
-        ]';
-    BEGIN
-        debug_output('💳 CPU_USAGE_PER_TXN validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('💳 CPU_USAGE_PER_TXN validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_cpu_usage_per_txn;
-
-    FUNCTION validate_background_cpu_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(
-                COALESCE(
-                    (SELECT value FROM v$metric WHERE metric_name = 'Background CPU Usage Per Sec' AND ROWNUM = 1),
-                    (SELECT value FROM v$metric WHERE metric_name = 'Host CPU Utilization (%)' AND ROWNUM = 1),
-                    0
-                ), 2), 0) as cpu_value
-            FROM dual
-        ]';
-    BEGIN
-        debug_output('🔧 BACKGROUND_CPU_USAGE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🔧 BACKGROUND_CPU_USAGE validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_background_cpu_usage;
-
-    FUNCTION validate_cpu_time_per_call(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(
-                COALESCE(
-                    (SELECT value FROM v$metric WHERE metric_name = 'CPU Time Per User Call' AND ROWNUM = 1),
-                    (SELECT value/GREATEST(calls.value, 1) FROM v$metric cpu, v$metric calls 
-                     WHERE cpu.metric_name = 'CPU Usage Per Sec' 
-                       AND calls.metric_name = 'User Calls Per Sec' AND ROWNUM = 1),
-                    0
-                ), 2), 0) as cpu_per_call
-            FROM dual
-        ]';
-    BEGIN
-        debug_output('📞 CPU_TIME_PER_CALL validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('📞 CPU_TIME_PER_CALL validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_cpu_time_per_call;
-
-    FUNCTION validate_pga_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT 
-                CASE 
-                    WHEN pga_target <= 0 THEN 
-                        ROUND(pga_used / 1024 / 1024, 2)
-                    ELSE 
-                        ROUND((pga_used / pga_target) * 100, 2)
-                END as pga_usage_value
-            FROM (
-                SELECT 
-                    NVL(MAX(CASE WHEN name = 'aggregate PGA target parameter' THEN value END), 0) as pga_target,
-                    NVL(MAX(CASE WHEN name = 'total PGA allocated' THEN value END), 0) as pga_used
-                FROM v$pgastat
-                WHERE name IN ('aggregate PGA target parameter', 'total PGA allocated')
-            )
-        ]';
-    BEGIN
-        debug_output('💾 PGA_MEMORY_USAGE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('💾 PGA_MEMORY_USAGE validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_pga_memory_usage;
-
-    FUNCTION validate_uga_memory_usage(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
         l_result t_validation_result;
-        l_runtime t_validation_runtime;
+        l_context t_tenant_context;
+        l_span_id VARCHAR2(16);
+        l_cpu_ratio NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
+        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        debug_output('🔄 UGA_MEMORY_USAGE validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🔄 UGA_MEMORY_USAGE validation - Returning NOT_SUPPORTED');
-        
-        l_result.validation_type_code := l_runtime.validation_type_code;
-        l_result.instance_name := p_instance_name;
-        l_result.target_identifier := l_runtime.target_identifier;
-        l_result.warning_threshold := l_runtime.warning_threshold;
-        l_result.critical_threshold := l_runtime.critical_threshold;
-        l_result.threshold_unit := l_runtime.threshold_unit;
-        l_result.check_timestamp := SYSTIMESTAMP;
-        l_result.current_value := 0;
-        l_result.status := C_OK;
-        l_result.status_message := 'UGA memory metrics not available in v$metric';
-        l_result.error_details := 'UGA monitoring not supported in this Oracle version';
-        l_result.response_time_ms := 1;
-        
-        RETURN l_result;
-    END validate_uga_memory_usage;
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_database_cpu_ratio', NULL, p_trace_id);
 
-    FUNCTION validate_memory_sorts_count(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(value, 0) as memory_sorts_count
-            FROM sys.v_$sysstat
-            WHERE name = 'sorts (memory)'
-        ]';
-    BEGIN
-        debug_output('🔢 MEMORY_SORTS_COUNT validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🔢 MEMORY_SORTS_COUNT validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_memory_sorts_count;
-
-    FUNCTION validate_workarea_memory_allocated(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_query CONSTANT VARCHAR2(1000) := q'[
-            SELECT NVL(ROUND(value/1024/1024, 2), 0) as pga_mb
-            FROM v$pgastat
-            WHERE name = 'total PGA allocated'
-        ]';
-    BEGIN
-        debug_output('🏗️ WORKAREA_MEMORY_ALLOCATED validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🏗️ WORKAREA_MEMORY_ALLOCATED validation - Executing query directly');
-        RETURN execute_validation_query(l_runtime, l_query, p_trace_id);
-    END validate_workarea_memory_allocated;
-
-    FUNCTION validate_certificate_expiration(
-        p_instance_name IN VARCHAR2,
-        p_target_identifier IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_result t_validation_result;
-        l_runtime t_validation_runtime;
-        l_start_time TIMESTAMP := SYSTIMESTAMP;
-        l_days_until_expiry NUMBER;
-        l_expiry_date DATE;
-    BEGIN
-        debug_output('🔐 CERTIFICATE_EXPIRATION validation - Loading runtime ONCE');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('🔐 CERTIFICATE_EXPIRATION validation - Custom logic execution');
-        
-        l_result.validation_type_code := l_runtime.validation_type_code;
+        -- Initialize result
+        l_result.validation_type := 'DB_CPU_RATIO';
         l_result.instance_name := p_instance_name;
         l_result.target_identifier := p_target_identifier;
-        l_result.warning_threshold := l_runtime.warning_threshold;
-        l_result.critical_threshold := l_runtime.critical_threshold;
-        l_result.threshold_unit := l_runtime.threshold_unit;
-        l_result.check_timestamp := SYSTIMESTAMP;
 
-        -- Mock certificate validation logic
-        BEGIN
-            CASE UPPER(p_target_identifier)
-                WHEN 'MAIN_SSL_CERT' THEN l_expiry_date := SYSDATE + 45;
-                WHEN 'TDE_WALLET' THEN l_expiry_date := SYSDATE + 15;
-                ELSE l_expiry_date := SYSDATE + DBMS_RANDOM.VALUE(1, 365);
-            END CASE;
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'DB_CPU_RATIO'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
 
-            l_days_until_expiry := l_expiry_date - SYSDATE;
-            l_result.current_value := l_days_until_expiry;
-            
-            l_result.status := evaluate_validation_status(
-                l_days_until_expiry,
-                l_runtime.warning_threshold,
-                l_runtime.critical_threshold,
-                'CERT_EXPIRATION'
-            );
-            
-            l_result.status_message := generate_status_message(
-                'Certificate ' || p_target_identifier,
-                'expires in',
-                l_days_until_expiry,
-                'days',
-                l_result.status
-            );
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
 
-            l_result.error_details := 'Certificate expires on: ' || TO_CHAR(l_expiry_date, 'YYYY-MM-DD');
+        -- Get database CPU ratio
+        SELECT ROUND(
+            (cpu_time.value / NULLIF(db_time.value, 0)) * 100, 2
+        ) INTO l_cpu_ratio
+        FROM 
+            (SELECT value FROM v$sysstat WHERE name = 'CPU used by this session') cpu_time,
+            (SELECT value FROM v$sysstat WHERE name = 'DB time') db_time;
 
-        EXCEPTION
-            WHEN OTHERS THEN
-                l_result.status := C_ERROR;
-                l_result.error_details := 'Certificate check error: ' || 
-                    SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
-                l_result.current_value := -1;
-        END;
+        l_result.measured_value := NVL(l_cpu_ratio, 0);
 
-        l_result.response_time_ms := EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000;
-        debug_output('🔐 CERTIFICATE_EXPIRATION validation - Result: ' || l_result.status);
-        
-        RETURN l_result;
-    END validate_certificate_expiration;
-
-    -- ========================================================================
-    -- FIXED: CORE EXECUTION AND ORCHESTRATION - NO MORE RECURSION!
-    -- ========================================================================
-
-    FUNCTION get_validations_due_for_check(
-        p_force_all BOOLEAN DEFAULT FALSE,
-        p_environment_name VARCHAR2 DEFAULT NULL
-    ) RETURN SYS_REFCURSOR IS
-        l_cursor SYS_REFCURSOR;
-        l_environment VARCHAR2(10);
-    BEGIN
-        l_environment := NVL(p_environment_name, detect_environment());
-        
-        IF p_force_all THEN
-            OPEN l_cursor FOR
-                SELECT 
-                    i.instance_name,
-                    i.validation_type_code,
-                    t.validation_procedure,
-                    r.check_interval_minutes
-                FROM db_validation_instances i
-                JOIN db_validation_types t ON i.validation_type_code = t.validation_type_code
-                JOIN db_validation_rules r ON i.validation_type_code = r.validation_type_code 
-                                           AND r.environment_name = l_environment
-                WHERE i.is_enabled = 1
-                  AND t.is_active = 1
-                  AND r.is_enabled = 1
-                ORDER BY r.check_interval_minutes, i.instance_name;
+        -- Determine status based on thresholds
+        IF l_cpu_ratio >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'DB CPU ratio critical: ' || l_cpu_ratio || '% (threshold: ' || l_critical_threshold || '%)';
+        ELSIF l_cpu_ratio >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'DB CPU ratio warning: ' || l_cpu_ratio || '% (threshold: ' || l_warning_threshold || '%)';
         ELSE
-            OPEN l_cursor FOR
-                SELECT 
-                    i.instance_name,
-                    i.validation_type_code,
-                    t.validation_procedure,
-                    r.check_interval_minutes
-                FROM db_validation_instances i
-                JOIN db_validation_types t ON i.validation_type_code = t.validation_type_code
-                JOIN db_validation_rules r ON i.validation_type_code = r.validation_type_code 
-                                           AND r.environment_name = l_environment
-                WHERE i.is_enabled = 1
-                  AND t.is_active = 1
-                  AND r.is_enabled = 1
-                  AND (i.last_check_time IS NULL 
-                       OR i.last_check_time + INTERVAL '1' MINUTE * r.check_interval_minutes <= SYSTIMESTAMP)
-                ORDER BY r.check_interval_minutes, i.instance_name;
+            l_result.status := 'OK';
+            l_result.message := 'DB CPU ratio normal: ' || l_cpu_ratio || '%';
         END IF;
 
-        RETURN l_cursor;
-    END get_validations_due_for_check;
-
-    /**
-     * FIXED: Execute validation instance - SIMPLIFIED, NO RECURSION
-     */
-    FUNCTION execute_validation_instance(
-        p_instance_name IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) RETURN t_validation_result IS
-        l_runtime t_validation_runtime;
-        l_result t_validation_result;
-    BEGIN
-        debug_output('🚀 === EXECUTE_VALIDATION_INSTANCE START (FIXED) ===');
-        debug_output('📋 Instance: ' || p_instance_name);
-        debug_output('🌍 Environment: ' || p_environment_name);
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('db_cpu.ratio_percentage', TO_CHAR(l_cpu_ratio));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
         
-        -- FIXED: Load runtime configuration ONCE at the beginning
-        debug_output('📚 Loading runtime configuration ONCE...');
-        l_runtime := load_validation_runtime(p_instance_name, p_environment_name);
-        debug_output('✅ Runtime loaded - Procedure: ' || l_runtime.validation_procedure);
-        debug_output('🎯 Target: ' || l_runtime.target_identifier);
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
         
-        debug_output('🔄 Calling validation procedure: ' || l_runtime.validation_procedure);
-        
-        -- FIXED: Direct calls to validation functions, passing runtime data
-        CASE l_runtime.validation_procedure
-            WHEN 'validate_tablespace_usage' THEN
-                debug_output('🗂️ Executing tablespace validation');
-                l_result := validate_tablespace_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_active_sessions' THEN
-                debug_output('👥 Executing active sessions validation');
-                l_result := validate_active_sessions(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_blocked_sessions' THEN
-                debug_output('🚫 Executing blocked sessions validation');
-                l_result := validate_blocked_sessions(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_invalid_objects' THEN
-                debug_output('⚠️ Executing invalid objects validation');
-                l_result := validate_invalid_objects(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_failed_jobs' THEN
-                debug_output('💼 Executing failed jobs validation');
-                l_result := validate_failed_jobs(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_memory_usage' THEN
-                debug_output('🧠 Executing memory usage validation');
-                l_result := validate_memory_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_cpu_usage' THEN
-                debug_output('⚡ Executing CPU usage validation');
-                l_result := validate_cpu_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_database_cpu_ratio' THEN
-                debug_output('📊 Executing database CPU ratio validation');
-                l_result := validate_database_cpu_ratio(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_cpu_usage_per_txn' THEN
-                debug_output('💳 Executing CPU usage per transaction validation');
-                l_result := validate_cpu_usage_per_txn(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_background_cpu_usage' THEN
-                debug_output('🔧 Executing background CPU usage validation');
-                l_result := validate_background_cpu_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_cpu_time_per_call' THEN
-                debug_output('📞 Executing CPU time per call validation');
-                l_result := validate_cpu_time_per_call(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_certificate_expiration' THEN
-                debug_output('🔐 Executing certificate expiration validation');
-                l_result := validate_certificate_expiration(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_pga_memory_usage' THEN
-                debug_output('💾 Executing PGA memory usage validation');
-                l_result := validate_pga_memory_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_uga_memory_usage' THEN
-                debug_output('🔄 Executing UGA memory usage validation');
-                l_result := validate_uga_memory_usage(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_memory_sorts_count' THEN
-                debug_output('🔢 Executing memory sorts count validation');
-                l_result := validate_memory_sorts_count(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            WHEN 'validate_workarea_memory_allocated' THEN
-                debug_output('🏗️ Executing work area memory validation');
-                l_result := validate_workarea_memory_allocated(
-                    p_instance_name => p_instance_name,
-                    p_target_identifier => l_runtime.target_identifier,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-            ELSE
-                debug_output('❌ UNKNOWN VALIDATION PROCEDURE: ' || l_runtime.validation_procedure);
-                RAISE_APPLICATION_ERROR(-20020, 'Unknown validation procedure: ' || l_runtime.validation_procedure);
-        END CASE;
-
-        debug_output('✅ Validation completed - Status: ' || l_result.status || ', Value: ' || l_result.current_value);
-        debug_output('📝 Error details: ' || NVL(l_result.error_details, 'none'));
-
-        -- Update validation instance with results
-        BEGIN
-            debug_output('💾 Updating db_validation_instances...');
-            UPDATE db_validation_instances
-            SET last_check_time = SYSTIMESTAMP,
-                last_check_status = l_result.status,
-                last_check_value = l_result.current_value,
-                consecutive_failures = CASE 
-                    WHEN l_result.status IN (C_OK, C_WARNING) THEN 0
-                    ELSE consecutive_failures + 1
-                END
-            WHERE instance_name = p_instance_name;
-            
-            debug_output('📊 Rows updated: ' || SQL%ROWCOUNT);
-        EXCEPTION
-            WHEN OTHERS THEN
-                debug_output('💥 ERROR updating instance: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-        END;
-
-        debug_output('🏁 === EXECUTE_VALIDATION_INSTANCE END (FIXED) ===');
         RETURN l_result;
 
     EXCEPTION
         WHEN OTHERS THEN
-            debug_output('💥 CRITICAL ERROR in execute_validation_instance: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-            
-            -- Create error result
-            l_result.validation_type_code := NVL(l_runtime.validation_type_code, 'UNKNOWN');
-            l_result.instance_name := p_instance_name;
-            l_result.status := C_ERROR;
-            l_result.error_details := 'Execution error: ' || 
-                                     SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200);
-            l_result.current_value := -1;
-            l_result.check_timestamp := SYSTIMESTAMP;
-
-            -- Update with error
-            UPDATE db_validation_instances
-            SET last_check_time = SYSTIMESTAMP,
-                last_check_status = C_ERROR,
-                last_check_value = -1,
-                consecutive_failures = consecutive_failures + 1
-            WHERE instance_name = p_instance_name;
-
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_database_cpu_ratio', 
+                'Error validating DB CPU ratio: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
             RETURN l_result;
-    END execute_validation_instance;
+    END validate_database_cpu_ratio;
 
-    -- ========================================================================
-    -- REST OF PROCEDURES (UNCHANGED FOR BREVITY)
-    -- ========================================================================
-
-    PROCEDURE execute_validation_type(
-        p_validation_type_code IN VARCHAR2,
-        p_environment_name IN VARCHAR2,
-        p_trace_id IN VARCHAR2 DEFAULT NULL
-    ) IS
+    FUNCTION validate_pga_memory_usage(
+        p_instance_name VARCHAR2,
+        p_target_identifier VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN t_validation_result
+    IS
         l_result t_validation_result;
-    BEGIN
-        debug_output('🔄 Executing validation type: ' || p_validation_type_code);
-        
-        FOR rec IN (
-            SELECT instance_name
-            FROM db_validation_instances
-            WHERE validation_type_code = p_validation_type_code
-              AND is_enabled = 1
-            ORDER BY instance_name
-        ) LOOP
-            BEGIN
-                l_result := execute_validation_instance(
-                    p_instance_name => rec.instance_name,
-                    p_environment_name => p_environment_name,
-                    p_trace_id => p_trace_id
-                );
-                debug_output('✅ Instance ' || rec.instance_name || ' completed: ' || l_result.status);
-            EXCEPTION
-                WHEN OTHERS THEN
-                    debug_output('💥 Instance ' || rec.instance_name || ' failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-            END;
-        END LOOP;
-    END execute_validation_type;
-
-    /**
-     * FIXED: Main validation procedure - FULL TELEMETRY RESTORED
-     */
-    PROCEDURE perform_database_validations(
-        p_force_all_checks BOOLEAN DEFAULT FALSE,
-        p_environment_name VARCHAR2 DEFAULT NULL
-    ) IS
-        l_trace_id VARCHAR2(32);
+        l_context t_tenant_context;
         l_span_id VARCHAR2(16);
-        l_environment VARCHAR2(10);
+        l_pga_pct NUMBER;
+        l_warning_threshold NUMBER;
+        l_critical_threshold NUMBER;
         l_attrs PLTelemetry.t_attributes;
-        l_start_time TIMESTAMP := SYSTIMESTAMP;
-        l_cursor SYS_REFCURSOR;
-        l_instance_name VARCHAR2(100);
-        l_validation_type VARCHAR2(100);
-        l_validation_procedure VARCHAR2(100);
-        l_check_interval NUMBER;
-        l_result t_validation_result;
-        l_validation_count NUMBER := 0;
-        l_error_count NUMBER := 0;
     BEGIN
-        debug_output('🚀 === PERFORM_DATABASE_VALIDATIONS START (TELEMETRY ACTIVE) ===');
+        l_context := detect_tenant_context();
+        l_span_id := PLTelemetry.start_span('validate_pga_memory_usage', NULL, p_trace_id);
+
+        -- Initialize result
+        l_result.validation_type := 'PGA_MEMORY_USAGE';
+        l_result.instance_name := p_instance_name;
+        l_result.target_identifier := p_target_identifier;
+
+        -- Get thresholds for current tenant/environment
+        SELECT warning_threshold, critical_threshold
+        INTO l_warning_threshold, l_critical_threshold
+        FROM db_validation_rules
+        WHERE validation_type_code = 'PGA_MEMORY_USAGE'
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        l_result.warning_threshold := l_warning_threshold;
+        l_result.critical_threshold := l_critical_threshold;
+
+        -- Get PGA memory usage percentage
+        SELECT ROUND(
+            (allocated.value / NULLIF(target.value, 0)) * 100, 2
+        ) INTO l_pga_pct
+        FROM 
+            (SELECT value FROM v$pgastat WHERE name = 'total PGA allocated') allocated,
+            (SELECT value FROM v$pgastat WHERE name = 'aggregate PGA target parameter') target;
+
+        l_result.measured_value := NVL(l_pga_pct, 0);
+
+        -- Determine status based on thresholds
+        IF l_pga_pct >= l_critical_threshold THEN
+            l_result.status := 'CRITICAL';
+            l_result.message := 'PGA memory usage critical: ' || l_pga_pct || '% (threshold: ' || l_critical_threshold || '%)';
+        ELSIF l_pga_pct >= l_warning_threshold THEN
+            l_result.status := 'WARNING';
+            l_result.message := 'PGA memory usage warning: ' || l_pga_pct || '% (threshold: ' || l_warning_threshold || '%)';
+        ELSE
+            l_result.status := 'OK';
+            l_result.message := 'PGA memory usage normal: ' || l_pga_pct || '%';
+        END IF;
+
+        -- Add attributes with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('pga.usage_percentage', TO_CHAR(l_pga_pct));
+        l_attrs(2) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(3) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.status', l_result.status);
         
-        -- Configure telemetry
-        configure_telemetry();
-
-        -- Detect environment
-        l_environment := NVL(p_environment_name, detect_environment());
-        debug_output('🌍 Environment: ' || l_environment);
-        debug_output('🔧 Force all: ' || CASE WHEN p_force_all_checks THEN 'YES' ELSE 'NO' END);
-
-        -- START DISTRIBUTED TRACING
-        l_trace_id := PLTelemetry.start_trace('database_validation_cycle');
-        l_span_id := PLTelemetry.start_span('perform_database_validations');
-
-        -- Add monitoring cycle context
-        l_attrs(1) := PLTelemetry.add_attribute('validation.cycle_time', TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD HH24:MI:SS'));
-        l_attrs(2) := PLTelemetry.add_attribute('validation.environment', l_environment);
-        l_attrs(3) := PLTelemetry.add_attribute('validation.force_all_checks', CASE WHEN p_force_all_checks THEN 'true' ELSE 'false' END);
-        PLTelemetry.add_event(l_span_id, 'database_validation_cycle_started', l_attrs);
-
-        -- Get validations due for checking
-        l_cursor := get_validations_due_for_check(p_force_all_checks, l_environment);
-
-        LOOP
-            FETCH l_cursor INTO l_instance_name, l_validation_type, l_validation_procedure, l_check_interval;
-            EXIT WHEN l_cursor%NOTFOUND;
-
-            l_validation_count := l_validation_count + 1;
-            debug_output('📋 [' || l_validation_count || '] Processing: ' || l_instance_name);
-            PLTelemetry.add_event(l_span_id, 'executing_validation_' || l_instance_name);
-
-            -- Execute validation with FULL distributed tracing
-            BEGIN
-                l_result := execute_validation_instance(
-                    p_instance_name => l_instance_name,
-                    p_environment_name => l_environment,
-                    p_trace_id => l_trace_id  -- PASS TRACE ID FOR DISTRIBUTED TRACING!
-                );
-
-                debug_output('✅ [' || l_validation_count || '] Result: ' || l_result.status || ' = ' || l_result.current_value);
-
-                -- Log validation result to distributed trace
-                PLTelemetry.log_distributed(
-                    p_trace_id => l_trace_id,
-                    p_level => CASE l_result.status 
-                                WHEN C_OK THEN 'INFO'
-                                WHEN C_WARNING THEN 'WARN'
-                                WHEN C_CRITICAL THEN 'ERROR'
-                                ELSE 'ERROR'
-                               END,
-                    p_message => 'Validation ' || l_instance_name || ': ' || l_result.status || 
-                               ' (value: ' || TO_CHAR(l_result.current_value, '999999.99') || ')',
-                    p_system => 'PLT_DB_MONITOR'
-                );
-
-            EXCEPTION
-                WHEN OTHERS THEN
-                    l_error_count := l_error_count + 1;
-                    debug_output('💥 [' || l_validation_count || '] ERROR: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-                    
-                    PLTelemetry.log_distributed(
-                        p_trace_id => l_trace_id,
-                        p_level => 'ERROR',
-                        p_message => 'Validation execution failed for ' || l_instance_name || ': ' || 
-                                   SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200),
-                        p_system => 'PLT_DB_MONITOR'
-                    );
-            END;
-        END LOOP;
-
-        CLOSE l_cursor;
-
-        -- GENERATE CYCLE METRICS
-        DECLARE
-            l_cycle_attrs PLTelemetry.t_attributes;
-        BEGIN
-            l_cycle_attrs(1) := PLTelemetry.add_attribute('cycle_type', 'database_validation');
-            l_cycle_attrs(2) := PLTelemetry.add_attribute('environment', l_environment);
-            l_cycle_attrs(3) := PLTelemetry.add_attribute('force_all', CASE WHEN p_force_all_checks THEN 'true' ELSE 'false' END);
-
-            -- Cycle duration metric
-            PLTelemetry.log_metric(
-                p_metric_name => 'db_validation_cycle_duration_ms',
-                p_value => EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000,
-                p_unit => 'milliseconds',
-                p_attributes => l_cycle_attrs,
-                p_include_trace_correlation => FALSE
-            );
-
-            -- Validation counts
-            PLTelemetry.log_metric(
-                p_metric_name => 'db_validations_executed_count',
-                p_value => l_validation_count,
-                p_unit => 'count',
-                p_attributes => l_cycle_attrs,
-                p_include_trace_correlation => FALSE
-            );
-
-            PLTelemetry.log_metric(
-                p_metric_name => 'db_validation_errors_count',
-                p_value => l_error_count,
-                p_unit => 'count',
-                p_attributes => l_cycle_attrs,
-                p_include_trace_correlation => FALSE
-            );
-
-            PLTelemetry.log_metric(
-                p_metric_name => 'db_validation_cycle_completed',
-                p_value => 1,
-                p_unit => 'count',
-                p_attributes => l_cycle_attrs,
-                p_include_trace_correlation => FALSE
-            );
-        END;
-
-        debug_output('📊 === VALIDATION CYCLE SUMMARY ===');
-        debug_output('✅ Validations executed: ' || l_validation_count);
-        debug_output('💥 Errors encountered: ' || l_error_count);
-        debug_output('⏱️ Duration: ' || ROUND(EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000, 2) || ' ms');
-
-        -- Log completion
-        l_attrs := PLTelemetry.t_attributes();
-        l_attrs(1) := PLTelemetry.add_attribute('validations_executed', TO_CHAR(l_validation_count));
-        l_attrs(2) := PLTelemetry.add_attribute('validation_errors', TO_CHAR(l_error_count));
-        l_attrs(3) := PLTelemetry.add_attribute('cycle.duration_ms', 
-            TO_CHAR(EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000, '999999.99'));
-        PLTelemetry.add_event(l_span_id, 'database_validation_cycle_completed', l_attrs);
-
-        PLTelemetry.end_span(l_span_id, CASE WHEN l_error_count = 0 THEN 'OK' ELSE 'ERROR' END);
-        PLTelemetry.end_trace(l_trace_id);
-
-        debug_output('🏁 === PERFORM_DATABASE_VALIDATIONS END (TELEMETRY ACTIVE) ===');
-
-        COMMIT;
+        PLTelemetry.end_span(l_span_id, CASE WHEN l_result.status = 'OK' THEN 'OK' ELSE 'ERROR' END, l_attrs);
+        
+        RETURN l_result;
 
     EXCEPTION
         WHEN OTHERS THEN
-            IF l_cursor%ISOPEN THEN
-                CLOSE l_cursor;
-            END IF;
-            
-            debug_output('💥 CRITICAL ERROR in perform_database_validations: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
-            
-            l_attrs := PLTelemetry.t_attributes();
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', 
-                SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
-            l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
-            
-            PLTelemetry.log_distributed(
-                p_trace_id => l_trace_id,
-                p_level => 'ERROR',
-                p_message => 'Database validation cycle failed: ' || 
-                           SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200),
-                p_system => 'PLT_DB_MONITOR'
+            l_result.status := 'ERROR';
+            l_result.message := 'Validation error: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200);
+            log_error_internal('validate_pga_memory_usage', 
+                'Error validating PGA memory usage: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
+            RETURN l_result;
+    END validate_pga_memory_usage;
+
+    --------------------------------------------------------------------------
+    -- UTILITY AND HELPER FUNCTIONS IMPLEMENTATION
+    --------------------------------------------------------------------------
+
+    FUNCTION get_validation_rules_for_current_tenant(p_validation_type_code VARCHAR2)
+        RETURN SYS_REFCURSOR
+    IS
+        l_cursor SYS_REFCURSOR;
+        l_context t_tenant_context;
+    BEGIN
+        l_context := detect_tenant_context();
+        
+        OPEN l_cursor FOR
+            SELECT 
+                validation_type_code,
+                warning_threshold,
+                critical_threshold,
+                threshold_unit,
+                check_interval_minutes,
+                is_enabled
+            FROM db_validation_rules
+            WHERE validation_type_code = p_validation_type_code
+              AND tenant_id = l_context.tenant_id
+              AND environment_name = l_context.environment_name;
+        
+        RETURN l_cursor;
+    END get_validation_rules_for_current_tenant;
+
+    FUNCTION get_enabled_instances_for_current_tenant(p_validation_type_code VARCHAR2 DEFAULT NULL)
+        RETURN SYS_REFCURSOR
+    IS
+        l_cursor SYS_REFCURSOR;
+        l_context t_tenant_context;
+    BEGIN
+        l_context := detect_tenant_context();
+        
+        OPEN l_cursor FOR
+            SELECT 
+                vi.validation_type_code,
+                vi.instance_name,
+                vi.target_identifier,
+                vi.instance_description,
+                vi.is_enabled,
+                vi.last_check_time,
+                vi.last_check_status,
+                vi.last_check_value,
+                vi.consecutive_failures
+            FROM db_validation_instances vi
+            WHERE vi.tenant_id = l_context.tenant_id
+              AND vi.environment_name = l_context.environment_name
+              AND vi.is_enabled = 1
+              AND (p_validation_type_code IS NULL OR vi.validation_type_code = p_validation_type_code)
+            ORDER BY vi.validation_type_code, vi.instance_name;
+        
+        RETURN l_cursor;
+    END get_enabled_instances_for_current_tenant;
+
+    FUNCTION is_validation_due(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_force_check BOOLEAN DEFAULT FALSE
+    ) RETURN BOOLEAN
+    IS
+        l_context t_tenant_context;
+        l_last_check_time TIMESTAMP;
+        l_check_interval NUMBER;
+        l_next_check_time TIMESTAMP;
+    BEGIN
+        -- Force check overrides all timing logic
+        IF p_force_check THEN
+            RETURN TRUE;
+        END IF;
+        
+        l_context := detect_tenant_context();
+        
+        -- Get last check time and interval
+        SELECT vi.last_check_time, vr.check_interval_minutes
+        INTO l_last_check_time, l_check_interval
+        FROM db_validation_instances vi
+        JOIN db_validation_rules vr ON (
+            vi.validation_type_code = vr.validation_type_code
+            AND vi.tenant_id = vr.tenant_id
+            AND vi.environment_name = vr.environment_name
+        )
+        WHERE vi.validation_type_code = p_validation_type_code
+          AND vi.instance_name = p_instance_name
+          AND vi.tenant_id = l_context.tenant_id
+          AND vi.environment_name = l_context.environment_name;
+
+        -- If never checked, validation is due
+        IF l_last_check_time IS NULL THEN
+            RETURN TRUE;
+        END IF;
+
+        -- Calculate next check time
+        l_next_check_time := l_last_check_time + (l_check_interval / 1440); -- Convert minutes to days
+        
+        -- Check if current time is past next check time
+        RETURN SYSTIMESTAMP >= l_next_check_time;
+
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            -- Instance or rule not found, assume validation is due
+            RETURN TRUE;
+        WHEN OTHERS THEN
+            log_error_internal('is_validation_due', 
+                'Error checking validation timing: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN TRUE; -- Default to checking when in doubt
+    END is_validation_due;
+
+    PROCEDURE update_validation_result(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_status VARCHAR2,
+        p_measured_value NUMBER DEFAULT NULL,
+        p_error_message VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_context t_tenant_context;
+        l_consecutive_failures NUMBER := 0;
+    BEGIN
+        l_context := detect_tenant_context();
+
+        -- Calculate consecutive failures
+        IF p_status IN ('WARNING', 'CRITICAL', 'ERROR') THEN
+            SELECT NVL(consecutive_failures, 0) + 1
+            INTO l_consecutive_failures
+            FROM db_validation_instances
+            WHERE validation_type_code = p_validation_type_code
+              AND instance_name = p_instance_name
+              AND tenant_id = l_context.tenant_id
+              AND environment_name = l_context.environment_name;
+        END IF;
+
+        -- Update validation instance results
+        UPDATE db_validation_instances
+        SET last_check_time = SYSTIMESTAMP,
+            last_check_status = p_status,
+            last_check_value = p_measured_value,
+            consecutive_failures = l_consecutive_failures,
+            updated_at = SYSTIMESTAMP
+        WHERE validation_type_code = p_validation_type_code
+          AND instance_name = p_instance_name
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name;
+
+        -- Log error message if provided
+        IF p_error_message IS NOT NULL THEN
+            log_error_internal('update_validation_result', 
+                'Validation result error for ' || p_validation_type_code || '/' || p_instance_name || ': ' || p_error_message);
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('update_validation_result', 
+                'Failed to update validation result: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+    END update_validation_result;
+
+    PROCEDURE send_validation_metrics(
+        p_validation_result t_validation_result,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_context t_tenant_context;
+        l_attrs PLTelemetry.t_attributes;
+        l_metric_name VARCHAR2(200);
+        l_status_value NUMBER;
+    BEGIN
+        l_context := detect_tenant_context();
+
+        -- Build comprehensive attributes with tenant context (CRITICAL!)
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('validation.type', p_validation_result.validation_type);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.instance', p_validation_result.instance_name);
+        l_attrs(5) := PLTelemetry.add_attribute('validation.target', p_validation_result.target_identifier);
+        l_attrs(6) := PLTelemetry.add_attribute('validation.status', p_validation_result.status);
+        l_attrs(7) := PLTelemetry.add_attribute('db.name', SYS_CONTEXT('USERENV', 'DB_NAME'));
+        l_attrs(8) := PLTelemetry.add_attribute('instance.identifier', l_context.instance_identifier);
+
+        -- Send measured value metric with tenant context
+        l_metric_name := 'db_' || LOWER(p_validation_result.validation_type) || '_value';
+        PLTelemetry.log_metric(l_metric_name, p_validation_result.measured_value, 
+            CASE p_validation_result.validation_type
+                WHEN 'TABLESPACE_USAGE' THEN 'percentage'
+                WHEN 'ACTIVE_SESSIONS' THEN 'count'
+                WHEN 'BLOCKED_SESSIONS' THEN 'count'
+                WHEN 'INVALID_OBJECTS' THEN 'count'
+                WHEN 'FAILED_JOBS' THEN 'count'
+                WHEN 'MEMORY_USAGE' THEN 'percentage'
+                WHEN 'CPU_USAGE' THEN 'percentage'
+                WHEN 'DB_CPU_RATIO' THEN 'percentage'
+                WHEN 'PGA_MEMORY_USAGE' THEN 'percentage'
+                ELSE 'unit'
+            END, 
+            l_attrs, FALSE);
+
+        -- Send status metric (0=OK, 1=WARNING, 2=CRITICAL, 3=ERROR)
+        l_status_value := CASE p_validation_result.status
+            WHEN 'OK' THEN 0
+            WHEN 'WARNING' THEN 1
+            WHEN 'CRITICAL' THEN 2
+            WHEN 'ERROR' THEN 3
+            ELSE 3
+        END;
+
+        l_metric_name := 'db_' || LOWER(p_validation_result.validation_type) || '_status';
+        PLTelemetry.log_metric(l_metric_name, l_status_value, 'status', l_attrs, FALSE);
+
+        -- Send threshold metrics for alerting context
+        IF p_validation_result.warning_threshold IS NOT NULL THEN
+            l_metric_name := 'db_' || LOWER(p_validation_result.validation_type) || '_warning_threshold';
+            PLTelemetry.log_metric(l_metric_name, p_validation_result.warning_threshold, 'threshold', l_attrs, FALSE);
+        END IF;
+
+        IF p_validation_result.critical_threshold IS NOT NULL THEN
+            l_metric_name := 'db_' || LOWER(p_validation_result.validation_type) || '_critical_threshold';
+            PLTelemetry.log_metric(l_metric_name, p_validation_result.critical_threshold, 'threshold', l_attrs, FALSE);
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('send_validation_metrics', 
+                'Failed to send validation metrics: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+    END send_validation_metrics;
+
+    PROCEDURE log_validation_event(
+        p_validation_type VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_event_name VARCHAR2,
+        p_message VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL
+    )
+    IS
+        l_context t_tenant_context;
+        l_attrs PLTelemetry.t_attributes;
+    BEGIN
+        l_context := detect_tenant_context();
+
+        -- Build event attributes with tenant context (CRITICAL!)
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('validation.type', p_validation_type);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.instance', p_instance_name);
+        l_attrs(5) := PLTelemetry.add_attribute('event.name', p_event_name);
+        l_attrs(6) := PLTelemetry.add_attribute('db.name', SYS_CONTEXT('USERENV', 'DB_NAME'));
+
+        -- Log event with tenant context
+        IF p_trace_id IS NOT NULL THEN
+            PLTelemetry.log_with_trace(p_trace_id, 'INFO', p_message, l_attrs);
+        ELSE
+            PLTelemetry.log_message('INFO', p_message, l_attrs);
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('log_validation_event', 
+                'Failed to log validation event: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                p_trace_id);
+    END log_validation_event;
+
+    --------------------------------------------------------------------------
+    -- CONFIGURATION AND MAINTENANCE IMPLEMENTATION
+    --------------------------------------------------------------------------
+
+    PROCEDURE set_validation_instance_enabled(
+        p_validation_type_code VARCHAR2,
+        p_instance_name VARCHAR2,
+        p_enabled BOOLEAN
+    )
+    IS
+        l_context t_tenant_context;
+        l_enabled_flag NUMBER;
+        l_attrs PLTelemetry.t_attributes;
+    BEGIN
+        l_context := detect_tenant_context();
+        l_enabled_flag := CASE WHEN p_enabled THEN 1 ELSE 0 END;
+
+        UPDATE db_validation_instances
+        SET is_enabled = l_enabled_flag,
+            updated_at = SYSTIMESTAMP
+        WHERE validation_type_code = p_validation_type_code
+          AND instance_name = p_instance_name
+          AND tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name;
+
+        IF SQL%ROWCOUNT = 0 THEN
+            RAISE_APPLICATION_ERROR(-20001, 'Validation instance not found: ' || p_validation_type_code || '/' || p_instance_name);
+        END IF;
+
+        -- Log configuration change with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('validation.type', p_validation_type_code);
+        l_attrs(4) := PLTelemetry.add_attribute('validation.instance', p_instance_name);
+        l_attrs(5) := PLTelemetry.add_attribute('enabled', CASE WHEN p_enabled THEN 'true' ELSE 'false' END);
+
+        PLTelemetry.log_message('INFO', 
+            'Validation instance ' || CASE WHEN p_enabled THEN 'enabled' ELSE 'disabled' END, l_attrs);
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('set_validation_instance_enabled', 
+                'Failed to update validation instance: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RAISE;
+    END set_validation_instance_enabled;
+
+    FUNCTION get_tenant_monitoring_status RETURN SYS_REFCURSOR
+    IS
+        l_cursor SYS_REFCURSOR;
+        l_context t_tenant_context;
+    BEGIN
+        l_context := detect_tenant_context();
+        
+        OPEN l_cursor FOR
+            SELECT 
+                l_context.tenant_id as tenant_id,
+                l_context.environment_name as environment_name,
+                l_context.instance_identifier as instance_identifier,
+                vt.validation_type_code,
+                vt.description,
+                COUNT(vi.instance_id) as total_instances,
+                SUM(CASE WHEN vi.is_enabled = 1 THEN 1 ELSE 0 END) as enabled_instances,
+                SUM(CASE WHEN vi.last_check_status = 'OK' THEN 1 ELSE 0 END) as ok_instances,
+                SUM(CASE WHEN vi.last_check_status = 'WARNING' THEN 1 ELSE 0 END) as warning_instances,
+                SUM(CASE WHEN vi.last_check_status = 'CRITICAL' THEN 1 ELSE 0 END) as critical_instances,
+                SUM(CASE WHEN vi.last_check_status = 'ERROR' THEN 1 ELSE 0 END) as error_instances,
+                MAX(vi.last_check_time) as last_validation_time,
+                vr.check_interval_minutes,
+                CASE WHEN vr.is_enabled = 1 THEN 'ENABLED' ELSE 'DISABLED' END as rule_status
+            FROM db_validation_types vt
+            LEFT JOIN db_validation_rules vr ON (
+                vt.validation_type_code = vr.validation_type_code
+                AND vr.tenant_id = l_context.tenant_id
+                AND vr.environment_name = l_context.environment_name
+            )
+            LEFT JOIN db_validation_instances vi ON (
+                vt.validation_type_code = vi.validation_type_code
+                AND vi.tenant_id = l_context.tenant_id
+                AND vi.environment_name = l_context.environment_name
+            )
+            WHERE vt.is_active = 1
+            GROUP BY vt.validation_type_code, vt.description, vr.check_interval_minutes, vr.is_enabled
+            ORDER BY vt.validation_type_code;
+        
+        RETURN l_cursor;
+    END get_tenant_monitoring_status;
+
+    FUNCTION validate_tenant_configuration RETURN BOOLEAN
+    IS
+        l_context t_tenant_context;
+        l_config_count NUMBER;
+        l_rules_count NUMBER;
+        l_instances_count NUMBER;
+        l_validation_ok BOOLEAN := TRUE;
+        l_attrs PLTelemetry.t_attributes;
+    BEGIN
+        l_context := detect_tenant_context();
+
+        -- Check if tenant configuration exists
+        SELECT COUNT(*)
+        INTO l_config_count
+        FROM plt_db_monitor_config
+        WHERE tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_active = 1;
+
+        IF l_config_count = 0 THEN
+            l_validation_ok := FALSE;
+            log_error_internal('validate_tenant_configuration', 
+                'No active configuration found for tenant ' || l_context.tenant_id || '/' || l_context.environment_name);
+        END IF;
+
+        -- Check if validation rules exist
+        SELECT COUNT(*)
+        INTO l_rules_count
+        FROM db_validation_rules
+        WHERE tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        IF l_rules_count = 0 THEN
+            l_validation_ok := FALSE;
+            log_error_internal('validate_tenant_configuration', 
+                'No validation rules found for tenant ' || l_context.tenant_id || '/' || l_context.environment_name);
+        END IF;
+
+        -- Check if validation instances exist
+        SELECT COUNT(*)
+        INTO l_instances_count
+        FROM db_validation_instances
+        WHERE tenant_id = l_context.tenant_id
+          AND environment_name = l_context.environment_name
+          AND is_enabled = 1;
+
+        IF l_instances_count = 0 THEN
+            l_validation_ok := FALSE;
+            log_error_internal('validate_tenant_configuration', 
+                'No enabled validation instances found for tenant ' || l_context.tenant_id || '/' || l_context.environment_name);
+        END IF;
+
+        -- Log configuration validation result with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('config.valid', CASE WHEN l_validation_ok THEN 'true' ELSE 'false' END);
+        l_attrs(4) := PLTelemetry.add_attribute('config.rules_count', TO_CHAR(l_rules_count));
+        l_attrs(5) := PLTelemetry.add_attribute('config.instances_count', TO_CHAR(l_instances_count));
+
+        PLTelemetry.log_message(
+            CASE WHEN l_validation_ok THEN 'INFO' ELSE 'WARN' END,
+            'Tenant configuration validation: ' || CASE WHEN l_validation_ok THEN 'VALID' ELSE 'INVALID' END,
+            l_attrs
+        );
+
+        RETURN l_validation_ok;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('validate_tenant_configuration', 
+                'Error validating tenant configuration: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200));
+            RETURN FALSE;
+    END validate_tenant_configuration;
+
+    PROCEDURE initialize_tenant_monitoring(p_auto_enable_instances BOOLEAN DEFAULT FALSE)
+    IS
+        l_context t_tenant_context;
+        l_trace_id VARCHAR2(32);
+        l_span_id VARCHAR2(16);
+        l_attrs PLTelemetry.t_attributes;
+        l_instances_created NUMBER := 0;
+        l_enabled_flag NUMBER;
+        
+        -- Cursor for discovered tablespaces
+        CURSOR c_tablespaces IS
+            SELECT tablespace_name
+            FROM dba_tablespaces
+            WHERE status = 'ONLINE'
+              AND contents IN ('PERMANENT', 'TEMPORARY')
+              AND tablespace_name NOT IN ('SYSTEM', 'SYSAUX', 'UNDOTBS1', 'TEMP');
+    BEGIN
+        l_context := detect_tenant_context();
+        l_enabled_flag := CASE WHEN p_auto_enable_instances THEN 1 ELSE 0 END;
+
+        -- Start trace for initialization
+        l_trace_id := PLTelemetry.start_trace('initialize_tenant_monitoring');
+        l_span_id := PLTelemetry.start_span('tenant_monitoring_initialization', NULL, l_trace_id);
+
+        -- Set tenant context
+        PLTelemetry.set_tenant_context(l_context.tenant_id, l_context.tenant_id || ' ' || l_context.environment_name);
+
+        -- Add initialization event with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('auto_enable', CASE WHEN p_auto_enable_instances THEN 'true' ELSE 'false' END);
+        PLTelemetry.add_event(l_span_id, 'tenant_initialization_started', l_attrs);
+
+        -- Create tablespace monitoring instances
+        FOR rec IN c_tablespaces LOOP
+            BEGIN
+                -- Insert tablespace instance if not exists
+                INSERT INTO db_validation_instances (
+                    validation_type_code,
+                    tenant_id,
+                    environment_name,
+                    instance_name,
+                    instance_description,
+                    target_identifier,
+                    is_enabled
+                ) 
+                SELECT 
+                    'TABLESPACE_USAGE',
+                    l_context.tenant_id,
+                    l_context.environment_name,
+                    l_context.tenant_id || '_' || l_context.environment_name || '_' || rec.tablespace_name || '_TS',
+                    'Auto-created tablespace monitoring for ' || rec.tablespace_name,
+                    rec.tablespace_name,
+                    l_enabled_flag
+                FROM dual
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM db_validation_instances
+                    WHERE validation_type_code = 'TABLESPACE_USAGE'
+                      AND tenant_id = l_context.tenant_id
+                      AND environment_name = l_context.environment_name
+                      AND target_identifier = rec.tablespace_name
+                );
+
+                IF SQL%ROWCOUNT > 0 THEN
+                    l_instances_created := l_instances_created + 1;
+                END IF;
+
+            EXCEPTION
+                WHEN OTHERS THEN
+                    log_error_internal('initialize_tenant_monitoring', 
+                        'Failed to create tablespace instance for ' || rec.tablespace_name || 
+                        ': ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200), l_trace_id);
+            END;
+        END LOOP;
+
+        -- Create global monitoring instances
+        BEGIN
+            -- Active sessions monitoring
+            INSERT INTO db_validation_instances (
+                validation_type_code, tenant_id, environment_name, instance_name, 
+                instance_description, target_identifier, is_enabled
+            ) 
+            SELECT 
+                'ACTIVE_SESSIONS', l_context.tenant_id, l_context.environment_name,
+                l_context.tenant_id || '_' || l_context.environment_name || '_ACTIVE_SESSIONS',
+                'Auto-created active sessions monitoring', 'ALL', l_enabled_flag
+            FROM dual
+            WHERE NOT EXISTS (
+                SELECT 1 FROM db_validation_instances
+                WHERE validation_type_code = 'ACTIVE_SESSIONS'
+                  AND tenant_id = l_context.tenant_id
+                  AND environment_name = l_context.environment_name
             );
 
-            PLTelemetry.end_span(l_span_id, 'ERROR', l_attrs);
+            IF SQL%ROWCOUNT > 0 THEN
+                l_instances_created := l_instances_created + 1;
+            END IF;
+
+            -- Memory usage monitoring
+            INSERT INTO db_validation_instances (
+                validation_type_code, tenant_id, environment_name, instance_name, 
+                instance_description, target_identifier, is_enabled
+            ) 
+            SELECT 
+                'MEMORY_USAGE', l_context.tenant_id, l_context.environment_name,
+                l_context.tenant_id || '_' || l_context.environment_name || '_SGA_MEMORY',
+                'Auto-created SGA memory monitoring', 'SGA', l_enabled_flag
+            FROM dual
+            WHERE NOT EXISTS (
+                SELECT 1 FROM db_validation_instances
+                WHERE validation_type_code = 'MEMORY_USAGE'
+                  AND tenant_id = l_context.tenant_id
+                  AND environment_name = l_context.environment_name
+                  AND target_identifier = 'SGA'
+            );
+
+            IF SQL%ROWCOUNT > 0 THEN
+                l_instances_created := l_instances_created + 1;
+            END IF;
+
+            -- CPU usage monitoring
+            INSERT INTO db_validation_instances (
+                validation_type_code, tenant_id, environment_name, instance_name, 
+                instance_description, target_identifier, is_enabled
+            ) 
+            SELECT 
+                'CPU_USAGE', l_context.tenant_id, l_context.environment_name,
+                l_context.tenant_id || '_' || l_context.environment_name || '_DATABASE_CPU',
+                'Auto-created database CPU monitoring', 'DB_CPU', l_enabled_flag
+            FROM dual
+            WHERE NOT EXISTS (
+                SELECT 1 FROM db_validation_instances
+                WHERE validation_type_code = 'CPU_USAGE'
+                  AND tenant_id = l_context.tenant_id
+                  AND environment_name = l_context.environment_name
+            );
+
+            IF SQL%ROWCOUNT > 0 THEN
+                l_instances_created := l_instances_created + 1;
+            END IF;
+
+        EXCEPTION
+            WHEN OTHERS THEN
+                log_error_internal('initialize_tenant_monitoring', 
+                    'Failed to create global monitoring instances: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                    l_trace_id);
+        END;
+
+        COMMIT;
+
+        -- Log completion with tenant context
+        l_attrs(1) := PLTelemetry.add_attribute('tenant.id', l_context.tenant_id);
+        l_attrs(2) := PLTelemetry.add_attribute('environment.name', l_context.environment_name);
+        l_attrs(3) := PLTelemetry.add_attribute('instances.created', TO_CHAR(l_instances_created));
+        l_attrs(4) := PLTelemetry.add_attribute('instances.auto_enabled', CASE WHEN p_auto_enable_instances THEN 'true' ELSE 'false' END);
+
+        PLTelemetry.add_event(l_span_id, 'tenant_initialization_completed', l_attrs);
+        PLTelemetry.end_span(l_span_id, 'OK', l_attrs);
+        PLTelemetry.end_trace(l_trace_id);
+
+        -- Send summary metrics with tenant context
+        PLTelemetry.log_metric('db_instances_created', l_instances_created, 'count', l_attrs, FALSE);
+
+        -- Log summary message
+        PLTelemetry.log_message('INFO', 
+            'Tenant monitoring initialized: ' || l_instances_created || ' instances created', l_attrs);
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('initialize_tenant_monitoring', 
+                'Critical error initializing tenant monitoring: ' || SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 200), 
+                l_trace_id);
+            PLTelemetry.end_span(l_span_id, 'ERROR');
             PLTelemetry.end_trace(l_trace_id);
-
-            ROLLBACK;
             RAISE;
-    END perform_database_validations;
-
-    -- ========================================================================
-    -- PLACEHOLDER IMPLEMENTATIONS FOR REMAINING PROCEDURES
-    -- ========================================================================
-
-    FUNCTION get_validation_runtime(
-        p_instance_name VARCHAR2,
-        p_environment_name VARCHAR2
-    ) RETURN t_validation_runtime IS
-    BEGIN
-        RETURN load_validation_runtime(p_instance_name, p_environment_name);
-    END get_validation_runtime;
-
-    PROCEDURE set_validation_monitoring(p_instance_name VARCHAR2, p_enabled NUMBER) IS
-    BEGIN
-        UPDATE db_validation_instances 
-        SET is_enabled = p_enabled
-        WHERE instance_name = p_instance_name;
-        COMMIT;
-    END set_validation_monitoring;
-
-    PROCEDURE add_validation_instance(
-        p_validation_type_code VARCHAR2,
-        p_instance_name VARCHAR2,
-        p_instance_description VARCHAR2,
-        p_target_identifier VARCHAR2,
-        p_enabled NUMBER DEFAULT 0
-    ) IS
-    BEGIN
-        INSERT INTO db_validation_instances (
-            validation_type_code, instance_name, instance_description,
-            target_identifier, is_enabled, consecutive_failures
-        ) VALUES (
-            p_validation_type_code, p_instance_name, p_instance_description,
-            p_target_identifier, p_enabled, 0
-        );
-        COMMIT;
-    END add_validation_instance;
-
-    PROCEDURE remove_validation_instance(p_instance_name VARCHAR2) IS
-    BEGIN
-        DELETE FROM db_validation_instances WHERE instance_name = p_instance_name;
-        COMMIT;
-    END remove_validation_instance;
-
-    PROCEDURE update_validation_instance(
-        p_instance_name VARCHAR2,
-        p_instance_description VARCHAR2 DEFAULT NULL,
-        p_target_identifier VARCHAR2 DEFAULT NULL
-    ) IS
-    BEGIN
-        UPDATE db_validation_instances 
-        SET instance_description = NVL(p_instance_description, instance_description),
-            target_identifier = NVL(p_target_identifier, target_identifier)
-        WHERE instance_name = p_instance_name;
-        COMMIT;
-    END update_validation_instance;
-
-    PROCEDURE reset_validation_failures(p_instance_name VARCHAR2) IS
-    BEGIN
-        UPDATE db_validation_instances 
-        SET consecutive_failures = 0
-        WHERE instance_name = p_instance_name;
-        COMMIT;
-    END reset_validation_failures;
-
-    PROCEDURE update_validation_thresholds(
-        p_validation_type_code VARCHAR2,
-        p_environment_name VARCHAR2,
-        p_warning_threshold NUMBER DEFAULT NULL,
-        p_critical_threshold NUMBER DEFAULT NULL,
-        p_check_interval_minutes NUMBER DEFAULT NULL
-    ) IS
-    BEGIN
-        UPDATE db_validation_rules 
-        SET warning_threshold = NVL(p_warning_threshold, warning_threshold),
-            critical_threshold = NVL(p_critical_threshold, critical_threshold),
-            check_interval_minutes = NVL(p_check_interval_minutes, check_interval_minutes)
-        WHERE validation_type_code = p_validation_type_code
-          AND environment_name = p_environment_name;
-        COMMIT;
-    END update_validation_thresholds;
-
-    PROCEDURE auto_populate_tablespace_instances(p_exclude_temp_tablespaces BOOLEAN DEFAULT TRUE) IS
-    BEGIN
-        debug_output('🗂️ Auto-populating tablespace instances...');
-        -- Implementation would go here
-        debug_output('✅ Tablespace instances populated');
-    END auto_populate_tablespace_instances;
-
-    PROCEDURE auto_populate_job_instances(p_exclude_system_jobs BOOLEAN DEFAULT TRUE) IS
-    BEGIN
-        debug_output('💼 Auto-populating job instances...');
-        -- Implementation would go here  
-        debug_output('✅ Job instances populated');
-    END auto_populate_job_instances;
-
-    FUNCTION generate_monitoring_report(
-        p_hours_back NUMBER DEFAULT 24,
-        p_environment_name VARCHAR2 DEFAULT NULL
-    ) RETURN CLOB IS
-        l_report CLOB;
-    BEGIN
-        debug_output('📊 Generating monitoring report...');
-        l_report := '{"status":"report_generation_placeholder","timestamp":"' || 
-                   TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '"}';
-        RETURN l_report;
-    END generate_monitoring_report;
+    END initialize_tenant_monitoring;
 
 END PLT_DB_MONITOR;
 /
