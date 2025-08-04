@@ -66,14 +66,23 @@ exporters:
     sampling_initial: 1
     sampling_thereafter: 1000   # Muy poco verbose
 
+# 🆕 EXTENSIONES - AQUÍ ESTÁ LA MAGIA
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: /
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
 service:
-  # 🔧 FIX: Telemetry sin address (inválido)
+  extensions: [health_check, pprof, zpages]
   telemetry:
     logs:
       level: "warn"
     metrics:
-      level: "basic"
-      # ❌ QUITAR: address: "0.0.0.0:8888"  <- ESTO ESTÁ MAL
+      level: "basic"    
 
   pipelines:
     traces:

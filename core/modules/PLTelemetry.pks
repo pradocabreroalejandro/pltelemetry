@@ -6,6 +6,7 @@ AS
     --              following OpenTelemetry standards
     -- Requirements: Oracle 12c+ (native JSON support)
 
+
     --------------------------------------------------------------------------
     -- TYPE DEFINITIONS
     --------------------------------------------------------------------------
@@ -39,9 +40,15 @@ AS
     C_SPAN_KIND_PRODUCER   CONSTANT VARCHAR2 (10) := 'PRODUCER';
     C_SPAN_KIND_CONSUMER   CONSTANT VARCHAR2 (10) := 'CONSUMER';
 
+
+    
     --------------------------------------------------------------------------
     -- GLOBAL VARIABLES
     --------------------------------------------------------------------------
+
+    -- Current context for activation checks
+    g_current_object_name   VARCHAR2(200);
+    g_auto_detect_context   BOOLEAN := TRUE;
 
     -- Current trace context
     g_current_trace_id              VARCHAR2 (32);
@@ -178,6 +185,13 @@ AS
      *   PLTelemetry.add_event(l_span_id, 'payment_processed');
      */
     PROCEDURE add_event (p_span_id VARCHAR2, p_event_name VARCHAR2, p_attributes t_attributes DEFAULT t_attributes ());
+
+    /**
+    * Helper function to diagnose span-related issues
+    * Call this when troubleshooting span problems
+    */
+    FUNCTION diagnose_span_issue(p_span_id VARCHAR2) 
+        RETURN VARCHAR2;
 
     --------------------------------------------------------------------------
     -- LOGGING FUNCTIONS
@@ -671,6 +685,46 @@ AS
      * @return plt_pulse_config_t - Current pulse throttling configuration
      */
     PROCEDURE safe_free_temp_clob(p_clob IN OUT CLOB);
+
+    --------------------------------------------------------------------------
+    -- ACTIVATION CONTEXT MANAGEMENT
+    --------------------------------------------------------------------------
+
+    /**
+     * Set current object context for activation checks
+     * Should be called at the start of each package/procedure
+     * 
+     * @param p_object_name Current object name (PACKAGE.PROCEDURE or FORM.TRIGGER)
+     * @example PLTelemetry.set_object_context('CUSTOMER_PKG.GET_CUSTOMER');
+     */
+    PROCEDURE set_object_context(p_object_name VARCHAR2);
+
+    /**
+     * Clear object context
+     */
+    PROCEDURE clear_object_context;
+
+    /**
+     * Get current object context
+     */
+    FUNCTION get_current_object_context RETURN VARCHAR2;
+
+    /**
+     * Auto-detect object context from call stack
+     * Uses DBMS_UTILITY.FORMAT_CALL_STACK to determine calling procedure
+     */
+    FUNCTION auto_detect_object_context RETURN VARCHAR2;
+
+    PROCEDURE log_error_internal(
+        p_module VARCHAR2,
+        p_error_message VARCHAR2,
+        p_trace_id VARCHAR2 DEFAULT NULL,
+        p_span_id VARCHAR2 DEFAULT NULL
+    );
+
+    --FUNCTION span_exists(p_span_id VARCHAR2) RETURN BOOLEAN;
+    
+    --FUNCTION trace_exists(p_trace_id VARCHAR2) RETURN BOOLEAN;
 
 END PLTelemetry;
 /

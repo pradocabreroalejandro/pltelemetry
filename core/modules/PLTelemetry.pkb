@@ -16,6 +16,63 @@ AS
      * - Logs: {"severity", "message", "timestamp", "trace_id", "span_id", "attributes"}
      */
 
+    /**
+    * Private function to check if span exists (fast lookup)
+    * Returns TRUE if span exists, FALSE otherwise
+    */
+    FUNCTION span_exists_internal(p_span_id VARCHAR2) RETURN BOOLEAN
+    IS
+        l_count NUMBER := 0;
+    BEGIN
+        IF p_span_id IS NULL THEN
+            RETURN FALSE;
+        END IF;
+        
+        SELECT COUNT(*)
+        INTO l_count
+        FROM plt_spans
+        WHERE span_id = p_span_id
+        AND ROWNUM = 1;  -- Performance optimization
+        
+        RETURN (l_count > 0);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- If we can't check, assume it doesn't exist (safe default)
+            log_error_internal('span_exists_internal', 
+                'Error checking span existence: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN FALSE;
+    END span_exists_internal;
+
+    /**
+    * Private function to check if trace exists (fast lookup)
+    * Returns TRUE if trace exists, FALSE otherwise
+    */
+    FUNCTION trace_exists_internal(p_trace_id VARCHAR2) RETURN BOOLEAN
+    IS
+        l_count NUMBER := 0;
+    BEGIN
+        IF p_trace_id IS NULL THEN
+            RETURN FALSE;
+        END IF;
+        
+        SELECT COUNT(*)
+        INTO l_count
+        FROM plt_traces
+        WHERE trace_id = p_trace_id
+        AND ROWNUM = 1;  -- Performance optimization
+        
+        RETURN (l_count > 0);
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- If we can't check, assume it doesn't exist (safe default)
+            log_error_internal('trace_exists_internal', 
+                'Error checking trace existence: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN FALSE;
+    END trace_exists_internal;
+
+
     --------------------------------------------------------------------------
     -- PRIVATE ERROR HANDLING HELPER
     --------------------------------------------------------------------------
@@ -1065,68 +1122,6 @@ AS
     -- TRACE MANAGEMENT
     --------------------------------------------------------------------------
 
-    /**
-     * Starts a new trace with the given operation name
-     */
-    FUNCTION start_trace (p_operation VARCHAR2)
-        RETURN VARCHAR2
-    IS
-        l_trace_id      VARCHAR2(32);
-        l_operation     VARCHAR2(255);
-        l_retry_count   NUMBER := 0;
-        l_max_retries   CONSTANT NUMBER := 3;
-        l_error_msg     VARCHAR2(4000);
-    BEGIN
-        -- Normalize & validate input parameters
-        l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
-        
-        IF l_operation IS NULL OR LENGTH(l_operation) = 0 THEN
-            RAISE_APPLICATION_ERROR(-20102, 'Operation name cannot be null or empty');
-        END IF;
-        
-        LOOP
-            BEGIN
-                l_trace_id := generate_trace_id();
-                set_internal_trace_context(l_trace_id, NULL);
-                set_trace_context();
-
-                INSERT INTO plt_traces (
-                    trace_id,
-                    root_operation,
-                    start_time,
-                    service_name,
-                    service_instance
-                ) VALUES (
-                    l_trace_id,
-                    l_operation,  -- Using normalized operation
-                    SYSTIMESTAMP,
-                    'oracle-plsql',
-                    SYS_CONTEXT('USERENV', 'HOST') || ':' || SYS_CONTEXT('USERENV', 'INSTANCE_NAME')
-                );
-
-                IF g_autocommit THEN
-                    COMMIT;
-                END IF;
-                
-                RETURN l_trace_id;
-                
-            EXCEPTION
-                WHEN DUP_VAL_ON_INDEX THEN
-                    l_retry_count := l_retry_count + 1;
-                    IF l_retry_count < l_max_retries THEN
-                        NULL; -- Retry with new ID
-                    ELSE
-                        l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                        log_error_internal('start_trace', l_error_msg, l_trace_id);
-                        RETURN l_trace_id; -- Return anyway
-                    END IF;
-                WHEN OTHERS THEN
-                    l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('start_trace', l_error_msg, l_trace_id);
-                    RETURN l_trace_id; -- Return anyway
-            END;
-        END LOOP;
-    END start_trace;
 
     /**
      * Ends the current trace and clears context
@@ -1295,8 +1290,11 @@ AS
     /**
      * Starts a new span within a trace
      */
-    FUNCTION start_span (p_operation VARCHAR2, p_parent_span_id VARCHAR2 DEFAULT NULL, p_trace_id VARCHAR2 DEFAULT NULL)
-        RETURN VARCHAR2
+    FUNCTION start_span (
+        p_operation VARCHAR2, 
+        p_parent_span_id VARCHAR2 DEFAULT NULL, 
+        p_trace_id VARCHAR2 DEFAULT NULL
+    ) RETURN VARCHAR2
     IS
         l_span_id       VARCHAR2(16);
         l_trace_id      VARCHAR2(32);
@@ -1305,6 +1303,8 @@ AS
         l_retry_count   NUMBER := 0;
         l_max_retries   CONSTANT NUMBER := 3;
         l_error_msg     VARCHAR2(4000);
+        l_parent_exists NUMBER;
+        l_trace_exists  NUMBER;  -- NEW: Track trace existence
     BEGIN
         -- Normalize & validate input parameters
         l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
@@ -1315,12 +1315,79 @@ AS
             RAISE_APPLICATION_ERROR(-20103, 'Operation name cannot be null or empty');
         END IF;
         
+        -- Use provided trace_id or current one
+        l_trace_id := NVL(l_trace_id, NVL(g_current_trace_id, generate_trace_id()));
+        
+        -- ========================================================================
+        -- NEW: VALIDATE TRACE EXISTS BEFORE CREATING SPAN
+        -- ========================================================================
+        
+        -- Check if trace exists in database (critical fix!)
+        BEGIN
+            SELECT COUNT(*)
+            INTO l_trace_exists
+            FROM plt_traces
+            WHERE trace_id = l_trace_id;
+            
+            IF l_trace_exists = 0 THEN
+                -- Handle disabled/dummy traces gracefully
+                IF l_trace_id LIKE 'disabled_%' THEN
+                    log_error_internal('start_span', 
+                        'Tracing disabled for operation: ' || l_operation || 
+                        ' (trace: ' || l_trace_id || ') - Span creation skipped', 
+                        l_trace_id);
+                    RETURN NULL; -- Return NULL instead of fake span_id
+                ELSE
+                    -- Real trace missing - this is a bug
+                    log_error_internal('start_span', 
+                        'Trace not found: ' || l_trace_id || ' for operation: ' || l_operation || 
+                        ' - Cannot create span without valid trace', 
+                        l_trace_id);
+                    RETURN NULL; -- Return NULL to prevent FK violations
+                END IF;
+            END IF;
+            
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                log_error_internal('start_span', 
+                    'Trace validation failed: ' || l_error_msg || ' - Skipping span creation', 
+                    l_trace_id);
+                RETURN NULL; -- Return NULL on validation error
+        END;
+        
+        -- ========================================================================
+        -- VALIDATE PARENT SPAN EXISTS IF PROVIDED
+        -- ========================================================================
+        
+        IF l_parent_span_id IS NOT NULL THEN
+            BEGIN
+                SELECT COUNT(*)
+                INTO l_parent_exists
+                FROM plt_spans
+                WHERE span_id = l_parent_span_id;
+                
+                IF l_parent_exists = 0 THEN
+                    log_error_internal('start_span', 
+                        'Parent span not found: ' || l_parent_span_id || 
+                        ' - Creating span without parent', l_trace_id);
+                    l_parent_span_id := NULL; -- Clear invalid parent
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    log_error_internal('start_span', 
+                        'Parent span validation failed - continuing without parent', l_trace_id);
+                    l_parent_span_id := NULL;
+            END;
+        END IF;
+        
+        -- ========================================================================
+        -- SPAN CREATION LOGIC (NOW GUARANTEED TO HAVE VALID TRACE)
+        -- ========================================================================
+        
         LOOP
             BEGIN
                 l_span_id := generate_span_id();
-                
-                -- Use provided trace_id or current one
-                l_trace_id := NVL(l_trace_id, NVL(g_current_trace_id, generate_trace_id()));
                 set_internal_trace_context(l_trace_id, l_span_id);
                 set_trace_context();
 
@@ -1335,7 +1402,7 @@ AS
                     l_trace_id,
                     l_span_id,
                     l_parent_span_id,
-                    l_operation,  -- Using normalized operation
+                    l_operation,
                     SYSTIMESTAMP,
                     'RUNNING'
                 );
@@ -1343,6 +1410,23 @@ AS
                 IF g_autocommit THEN
                     COMMIT;
                 END IF;
+
+                -- Verify the span was created successfully
+                DECLARE
+                    l_verify_count NUMBER;
+                BEGIN
+                    SELECT COUNT(*)
+                    INTO l_verify_count
+                    FROM plt_spans
+                    WHERE span_id = l_span_id;
+                    
+                    IF l_verify_count = 0 THEN
+                        log_error_internal('start_span', 
+                            'Span creation verification failed: ' || l_span_id, l_trace_id, l_span_id);
+                    END IF;
+                EXCEPTION
+                    WHEN OTHERS THEN NULL; -- Don't fail on verification
+                END;
 
                 RETURN l_span_id;
                 
@@ -1352,18 +1436,36 @@ AS
                     IF l_retry_count < l_max_retries THEN
                         NULL; -- Retry with new span_id
                     ELSE
-                        l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                        l_error_msg := 'Max retries exceeded for span creation';
                         log_error_internal('start_span', l_error_msg, l_trace_id, l_span_id);
                         set_internal_trace_context(l_trace_id, l_span_id);
-                        RETURN l_span_id;
+                        RETURN l_span_id; -- Return anyway
                     END IF;
+                    
                 WHEN OTHERS THEN
-                    l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                    log_error_internal('start_span', l_error_msg, l_trace_id, l_span_id);
-                    set_internal_trace_context(l_trace_id, l_span_id);
-                    RETURN l_span_id;
+                    -- Check specifically for FK constraint violation on trace
+                    IF SQLCODE = -2291 AND UPPER(SQLERRM) LIKE '%FK_SPANS_TRACE%' THEN
+                        log_error_internal('start_span', 
+                            'FK violation: trace_id ' || l_trace_id || ' does not exist in plt_traces', 
+                            l_trace_id, l_span_id);
+                        RETURN NULL; -- Return NULL instead of fake span_id
+                    ELSE
+                        -- Other errors
+                        l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                        log_error_internal('start_span', 'Span creation error: ' || l_error_msg, l_trace_id, l_span_id);
+                        set_internal_trace_context(l_trace_id, l_span_id);
+                        RETURN l_span_id; -- Return anyway to avoid breaking caller
+                    END IF;
             END;
         END LOOP;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            -- Ultimate exception handler
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            log_error_internal('start_span', 
+                'Critical error in start_span: ' || l_error_msg, l_trace_id);
+            RETURN NULL; -- Return NULL instead of potentially invalid span_id
     END start_span;
 
     /**
@@ -1521,21 +1623,75 @@ AS
     /**
      * Adds an event to an active span
      */
-    PROCEDURE add_event (p_span_id VARCHAR2, p_event_name VARCHAR2, p_attributes t_attributes DEFAULT t_attributes())
+    PROCEDURE add_event (
+        p_span_id VARCHAR2, 
+        p_event_name VARCHAR2, 
+        p_attributes t_attributes DEFAULT t_attributes()
+    )
     IS
         l_attrs_varchar   VARCHAR2(4000);
         l_error_msg       VARCHAR2(4000);
         l_span_id         VARCHAR2(16);
         l_event_name      VARCHAR2(255);
+        l_span_exists     NUMBER;
+        l_span_active     NUMBER;
     BEGIN
         -- Normalize & validate input parameters
         l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => FALSE);
         l_event_name := normalize_string(p_event_name, p_max_length => 255, p_allow_null => FALSE);
         
         IF l_span_id IS NULL OR l_event_name IS NULL THEN
+            log_error_internal('add_event', 'Invalid input: span_id or event_name is null', NULL, l_span_id);
             RETURN;
         END IF;
 
+        -- ========================================================================
+        -- VALIDATE SPAN EXISTS BEFORE INSERTING EVENT
+        -- ========================================================================
+        
+        BEGIN
+            -- Check if span exists and is still active (not ended)
+            SELECT COUNT(*)
+            INTO l_span_exists
+            FROM plt_spans
+            WHERE span_id = l_span_id;
+            
+            IF l_span_exists = 0 THEN
+                -- Span doesn't exist - log warning but don't fail
+                log_error_internal('add_event', 
+                    'Span not found: ' || l_span_id || ' for event: ' || l_event_name || 
+                    ' - Event will be skipped to prevent FK violation', 
+                    NULL, l_span_id);
+                RETURN;
+            END IF;
+            
+            -- Additional check: verify span is still active (optional safety)
+            SELECT COUNT(*)
+            INTO l_span_active
+            FROM plt_spans
+            WHERE span_id = l_span_id
+            AND end_time IS NULL;
+            
+            IF l_span_active = 0 THEN
+                -- Span exists but is already ended - log info and continue
+                log_error_internal('add_event', 
+                    'Adding event to ended span: ' || l_span_id || ' - Event: ' || l_event_name, 
+                    NULL, l_span_id);
+                -- Continue anyway - events can be added to ended spans for completeness
+            END IF;
+            
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                log_error_internal('add_event', 
+                    'Span validation failed: ' || l_error_msg, NULL, l_span_id);
+                RETURN; -- Don't proceed if we can't validate span
+        END;
+
+        -- ========================================================================
+        -- EXISTING LOGIC (UNCHANGED) - CONVERT ATTRIBUTES TO JSON
+        -- ========================================================================
+        
         -- Convert attributes to JSON
         BEGIN
             l_attrs_varchar := CASE 
@@ -1552,523 +1708,127 @@ AS
         -- Validate JSON
         IF l_attrs_varchar != '{}' AND l_attrs_varchar IS NOT JSON THEN
             l_attrs_varchar := '{}';
-        END IF;
-
-        -- Insert event
-        INSERT INTO plt_events (
-            span_id,
-            event_name,
-            event_time,
-            attributes
-        ) VALUES (
-            l_span_id,
-            l_event_name,
-            SYSTIMESTAMP,
-            l_attrs_varchar
-        );
-
-        IF g_autocommit THEN
-            COMMIT;
-        END IF;
-
-    EXCEPTION
-        WHEN OTHERS THEN
-            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('add_event', l_error_msg, NULL, l_span_id);
-    END add_event;
-
-    --------------------------------------------------------------------------
-    -- METRICS
-    --------------------------------------------------------------------------
-
-    /**
-    * Records a metric value with associated metadata
-    * Updated with pulse throttling and dynamic sampling
-    */
-    PROCEDURE log_metric (p_metric_name    VARCHAR2,
-                    p_value          NUMBER,
-                    p_unit           VARCHAR2 DEFAULT NULL,
-                    p_attributes     t_attributes DEFAULT t_attributes(),
-                    p_include_trace_correlation BOOLEAN DEFAULT TRUE)
-    IS
-        l_json         VARCHAR2(32767);
-        l_attrs_json   VARCHAR2(4000);
-        l_error_msg    VARCHAR2(4000);
-        l_value_str    VARCHAR2(50);
-        l_metric_name  VARCHAR2(255);
-        l_unit         VARCHAR2(50);
-        l_trace_id     VARCHAR2(32);
-        l_span_id      VARCHAR2(16);
-        l_pulse_mode   VARCHAR2(10);
-        l_sampled      BOOLEAN := TRUE;
-        l_attrs_enhanced t_attributes;
-        l_attr_idx     NUMBER;
-    BEGIN
-        -- ========================================================================
-        -- PULSE THROTTLING PRE-CHECKS
-        -- ========================================================================
-        
-        -- Check if metrics are enabled for current pulse mode
-        IF NOT should_process_telemetry('METRICS') THEN
-            -- In COMA mode or if metrics disabled, drop the metric silently
-            RETURN;
-        END IF;
-        
-        -- Get current pulse mode for context
-        l_pulse_mode := get_agent_pulse_mode();
-        
-        -- Apply dynamic sampling based on pulse mode
-        IF NOT should_sample_telemetry() THEN
-            -- Metric was sampled out - increment dropped counter if we can
-            BEGIN
-                -- Try to record a sampling metric (only if we're in a mode that allows it)
-                IF l_pulse_mode IN ('PULSE1', 'PULSE2') THEN
-                    -- Only track sampling stats in higher capacity modes to avoid recursion
-                    INSERT INTO plt_metrics (
-                        metric_name,
-                        metric_value,
-                        metric_unit,
-                        timestamp,
-                        attributes
-                    ) VALUES (
-                        'pltelemetry.sampling.dropped_metrics',
-                        1,
-                        'count',
-                        SYSTIMESTAMP,
-                        '{"pulse_mode":"' || l_pulse_mode || '","original_metric":"' || 
-                        REPLACE(SUBSTR(p_metric_name, 1, 100), '"', '\"') || '"}'
-                    );
-                    
-                    IF g_autocommit THEN
-                        COMMIT;
-                    END IF;
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL; -- Don't fail on sampling stats
-            END;
-            
-            RETURN; -- Drop this metric due to sampling
+            log_error_internal('add_event', 'Invalid JSON in attributes, using empty object', NULL, l_span_id);
         END IF;
 
         -- ========================================================================
-        -- EXISTING VALIDATION AND PROCESSING WITH ENHANCEMENTS
+        -- PROTECTED INSERT WITH ADDITIONAL FK SAFETY
         -- ========================================================================
         
-        -- Normalize & validate input parameters (existing logic)
-        l_metric_name := normalize_string(p_metric_name, p_max_length => 255, p_allow_null => FALSE);
-        l_unit := normalize_string(p_unit, p_max_length => 50, p_allow_null => TRUE);
-        
-        IF l_metric_name IS NULL OR p_value IS NULL THEN
-            RETURN;
-        END IF;
-        
-        l_unit := NVL(l_unit, 'unit');
-
-        -- Conditional trace correlation (existing logic)
-        IF p_include_trace_correlation THEN
-            l_trace_id := g_current_trace_id;
-            l_span_id := g_current_span_id;
-        ELSE
-            l_trace_id := NULL;
-            l_span_id := NULL;
-        END IF;
-
-        -- ========================================================================
-        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
-        -- ========================================================================
-        
-        -- Copy original attributes and add pulse context
-        l_attrs_enhanced := p_attributes;
-        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
-        
-        -- Add pulse mode context to all metrics
-        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
-        l_attr_idx := l_attr_idx + 1;
-        
-        -- Add sampling rate for observability
-        DECLARE
-            l_config plt_pulse_config_t;
+        -- Insert event with additional protection
         BEGIN
-            l_config := get_pulse_throttling_config(l_pulse_mode);
-            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.sampling_rate',
-                                            CASE 
-                                            WHEN l_config.sampling_rate = TRUNC(l_config.sampling_rate) THEN 
-                                                TO_CHAR(TRUNC(l_config.sampling_rate))  -- "1" para números enteros
-                                            ELSE 
-                                                TO_CHAR(l_config.sampling_rate, 'FM0.999999999')  -- "0.75" para decimales
-                                            END);
-            l_attr_idx := l_attr_idx + 1;
-            
-            -- Add capacity context for system monitoring
-            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.capacity_multiplier',
-                                            CASE 
-                                            WHEN l_config.capacity_multiplier = TRUNC(l_config.capacity_multiplier) THEN 
-                                                TO_CHAR(TRUNC(l_config.capacity_multiplier))
-                                            ELSE 
-                                                TO_CHAR(l_config.capacity_multiplier, 'FM0.999999999')
-                                            END);
-        EXCEPTION
-            WHEN OTHERS THEN
-                -- Don't fail on pulse context addition
-                NULL;
-        END;
-
-        -- Convert enhanced attributes to JSON
-        l_attrs_json := attributes_to_json(l_attrs_enhanced);
-
-        -- ========================================================================
-        -- EXISTING JSON BUILDING AND SENDING LOGIC
-        -- ========================================================================
-        
-        -- Handle number formatting (existing logic)
-        BEGIN
-            l_value_str := NVL(RTRIM(TO_CHAR(p_value, 'FM99999999999990.999999'), '.'), '0');
-        EXCEPTION
-            WHEN OTHERS THEN
-                l_value_str := '0';
-        END;
-
-        -- Build metric JSON - conditional trace/span fields (existing logic)
-        l_json := '{'
-            || '"name":"' || escape_json_string(l_metric_name) || '",'
-            || '"value":' || l_value_str || ','
-            || '"unit":"' || REPLACE(l_unit, '"', '\"') || '",'
-            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
-            || CASE WHEN l_trace_id IS NOT NULL THEN '"trace_id":"' || l_trace_id || '",' ELSE '' END
-            || CASE WHEN l_span_id IS NOT NULL THEN '"span_id":"' || l_span_id || '",' ELSE '' END
-            || '"attributes":' || l_attrs_json
-            || '}';
-
-        -- Validate JSON (existing logic)
-        IF l_json IS NOT JSON THEN
-            log_error_internal('log_metric', 'Invalid metric JSON generated for pulse mode: ' || l_pulse_mode);
-            RETURN;
-        END IF;
-
-        -- Log to metrics table (existing logic)
-        INSERT INTO plt_metrics (
-            metric_name,
-            metric_value,
-            metric_unit,
-            trace_id,
-            span_id,
-            timestamp,
-            attributes
-        ) VALUES (
-            l_metric_name,
-            p_value,
-            l_unit,
-            l_trace_id,  -- Can be NULL
-            l_span_id,   -- Can be NULL
-            SYSTIMESTAMP,
-            l_attrs_json
-        );
-
-        -- Send to backend (existing logic)
-        send_to_backend(l_json);
-
-        IF g_autocommit THEN
-            COMMIT;
-        END IF;
-
-    EXCEPTION
-        WHEN OTHERS THEN
-            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            log_error_internal('log_metric', 
-                'Metric error (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg);
-    END log_metric;
-
-    --------------------------------------------------------------------------
-    -- LOGGING FUNCTIONS
-    --------------------------------------------------------------------------
-
-    /**
-    * Internal helper to build and send log JSON with pulse throttling
-    * Updated with intelligent log sampling and pulse-aware processing
-    */
-    PROCEDURE send_log_internal(
-        p_trace_id   VARCHAR2,
-        p_span_id    VARCHAR2,
-        p_level      VARCHAR2,
-        p_message    VARCHAR2,
-        p_attributes t_attributes
-    )
-    IS
-        l_json         VARCHAR2(32767);
-        l_attrs_json   VARCHAR2(4000);
-        l_error_msg    VARCHAR2(4000);
-        l_trace_id     VARCHAR2(32);
-        l_span_id      VARCHAR2(16);
-        l_level        VARCHAR2(10);
-        l_message      VARCHAR2(4000);
-        l_pulse_mode   VARCHAR2(10);
-        l_config       plt_pulse_config_t;
-        l_should_sample BOOLEAN := TRUE;
-        l_level_priority NUMBER;
-        l_attrs_enhanced t_attributes;
-        l_attr_idx     NUMBER;
-        l_message_size NUMBER;
-    BEGIN
-        -- ========================================================================
-        -- INPUT NORMALIZATION AND VALIDATION
-        -- ========================================================================
-        
-        -- Normalize & validate input parameters
-        l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => TRUE);
-        l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => TRUE);
-        l_level := normalize_string(p_level, p_max_length => 10, p_allow_null => FALSE);
-        l_message := normalize_string(p_message, p_max_length => 4000, p_allow_null => FALSE);
-        
-        IF l_level IS NULL OR l_message IS NULL THEN
-            RETURN;
-        END IF;
-
-        l_message_size := LENGTH(l_message);
-
-        -- ========================================================================
-        -- PULSE THROTTLING PRE-CHECKS
-        -- ========================================================================
-        
-        -- Get current pulse mode and configuration
-        l_pulse_mode := get_agent_pulse_mode();
-        l_config := get_pulse_throttling_config(l_pulse_mode);
-        
-        -- Check if logs are enabled for current pulse mode
-        IF l_config.logs_enabled = 'N' THEN
-            -- In COMA mode or if logs disabled, drop silently
-            RETURN;
-        END IF;
-        
-        -- ========================================================================
-        -- INTELLIGENT LOG LEVEL SAMPLING
-        -- ========================================================================
-        
-        -- Assign priority to log levels (higher number = more important)
-        l_level_priority := CASE UPPER(l_level)
-            WHEN 'TRACE' THEN 1
-            WHEN 'DEBUG' THEN 2
-            WHEN 'INFO' THEN 3
-            WHEN 'WARN' THEN 4
-            WHEN 'WARNING' THEN 4
-            WHEN 'ERROR' THEN 5
-            WHEN 'FATAL' THEN 6
-            ELSE 3  -- Default to INFO level
-        END;
-        
-        -- Apply intelligent sampling based on log level and pulse mode
-        CASE l_pulse_mode
-            WHEN 'PULSE1' THEN
-                -- Full capacity - sample all logs
-                l_should_sample := TRUE;
-                
-            WHEN 'PULSE2' THEN
-                -- 50% capacity - sample based on level and general sampling
-                l_should_sample := (l_level_priority >= 4) OR should_sample_telemetry();
-                
-            WHEN 'PULSE3' THEN
-                -- 25% capacity - only WARN+ guaranteed, others sampled
-                l_should_sample := (l_level_priority >= 4) OR 
-                                (l_level_priority >= 3 AND should_sample_telemetry());
-                
-            WHEN 'PULSE4' THEN
-                -- 10% capacity - only ERROR+ guaranteed, others heavily sampled
-                l_should_sample := (l_level_priority >= 5) OR 
-                                (l_level_priority >= 3 AND DBMS_RANDOM.VALUE(0, 1) <= 0.1);
-                
-            WHEN 'COMA' THEN
-                -- Hibernation - only FATAL guaranteed
-                l_should_sample := (l_level_priority >= 6);
-                
-            ELSE
-                l_should_sample := TRUE;
-        END CASE;
-        
-        -- Override: Always sample errors from PLTelemetry itself for debugging
-        IF UPPER(l_message) LIKE '%PLTELEMETRY%' AND l_level_priority >= 5 THEN
-            l_should_sample := TRUE;
-        END IF;
-        
-        -- Apply sampling decision
-        IF NOT l_should_sample THEN
-            -- Log was sampled out - track sampling stats (avoid recursion)
-            BEGIN
-                IF l_pulse_mode IN ('PULSE1', 'PULSE2') AND l_level_priority <= 3 THEN
-                    -- Only track sampling stats in higher capacity modes for low-priority logs
-                    INSERT INTO plt_logs (
-                        log_level,
-                        message,
-                        timestamp,
-                        attributes
-                    ) VALUES (
-                        'DEBUG',
-                        'Log sampling: dropped ' || UPPER(l_level) || ' log',
-                        SYSTIMESTAMP,
-                        '{"pulse_mode":"' || l_pulse_mode || '","original_level":"' || UPPER(l_level) || 
-                        '","message_size":' || l_message_size || '}'
-                    );
-                    
-                    IF g_autocommit THEN
-                        COMMIT;
-                    END IF;
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL; -- Don't fail on sampling stats
-            END;
-            
-            RETURN; -- Drop this log due to sampling
-        END IF;
-
-        -- ========================================================================
-        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
-        -- ========================================================================
-        
-        -- Copy original attributes and add pulse context
-        l_attrs_enhanced := p_attributes;
-        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
-        
-        -- Add pulse mode context to logs
-        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
-        l_attr_idx := l_attr_idx + 1;
-        
-        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.log_sampling_rate', 
-            TO_CHAR(l_config.sampling_rate, 'FM0.9999'));
-        l_attr_idx := l_attr_idx + 1;
-        
-        -- Add log processing context
-        l_attrs_enhanced(l_attr_idx) := add_attribute('log.level_priority', TO_CHAR(l_level_priority));
-        l_attr_idx := l_attr_idx + 1;
-        
-        l_attrs_enhanced(l_attr_idx) := add_attribute('log.message_size', TO_CHAR(l_message_size));
-        l_attr_idx := l_attr_idx + 1;
-        
-        -- Add system context for correlation
-        l_attrs_enhanced(l_attr_idx) := add_attribute('system.processing_mode', get_processing_mode());
-
-        -- Convert enhanced attributes to JSON
-        l_attrs_json := attributes_to_json(l_attrs_enhanced);
-
-        -- ========================================================================
-        -- JSON BUILDING WITH PULSE CONTEXT
-        -- ========================================================================
-        
-        -- Build log JSON with enhanced attributes
-        l_json := '{'
-            || '"severity":"' || UPPER(l_level) || '",'
-            || '"message":"' || escape_json_string(l_message) || '",'
-            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
-            || CASE 
-                    WHEN l_trace_id IS NOT NULL AND LENGTH(l_trace_id) = 32 
-                    THEN '"trace_id":"' || l_trace_id || '",'
-                    ELSE ''
-                END
-            || CASE 
-                    WHEN l_span_id IS NOT NULL AND LENGTH(l_span_id) = 16 
-                    THEN '"span_id":"' || l_span_id || '",'
-                    ELSE ''
-                END
-            || '"attributes":' || l_attrs_json
-            || '}';
-
-        -- ========================================================================
-        -- DATABASE STORAGE WITH PULSE AWARENESS
-        -- ========================================================================
-        
-        -- Store in local logs table (always store, even if backend fails)
-        BEGIN
-            INSERT INTO plt_logs (
-                trace_id,
-                span_id, 
-                log_level,
-                message,
-                timestamp,
+            INSERT INTO plt_events (
+                span_id,
+                event_name,
+                event_time,
                 attributes
             ) VALUES (
-                l_trace_id,
                 l_span_id,
-                UPPER(l_level),
-                l_message,
+                l_event_name,
                 SYSTIMESTAMP,
-                l_attrs_json
+                l_attrs_varchar
             );
+
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
+            
         EXCEPTION
             WHEN OTHERS THEN
-                l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-                -- Use plt_telemetry_errors as ultimate fallback (avoid recursion)
-                INSERT INTO plt_telemetry_errors (
-                    error_time,
-                    error_message,
-                    module_name
-                ) VALUES (
-                    SYSTIMESTAMP,
-                    'Failed to insert into plt_logs (Pulse: ' || l_pulse_mode || '): ' || l_error_msg,
-                    'send_log_internal'
-                );
+                -- Check specifically for FK constraint violation
+                IF SQLCODE = -2291 AND SQLERRM LIKE '%FK_EVENTS_SPAN%' THEN
+                    l_error_msg := 'FK_EVENTS_SPAN violation: span_id ' || l_span_id || 
+                                ' missing from plt_spans table for event: ' || l_event_name;
+                    log_error_internal('add_event', l_error_msg, NULL, l_span_id);
+                    
+                    -- Try to diagnose the issue
+                    DECLARE
+                        l_span_count NUMBER;
+                        l_trace_id VARCHAR2(32);
+                    BEGIN
+                        SELECT COUNT(*), MAX(trace_id)
+                        INTO l_span_count, l_trace_id
+                        FROM plt_spans
+                        WHERE span_id = l_span_id;
+                        
+                        log_error_internal('add_event', 
+                            'Diagnostic: span_count=' || l_span_count || ', trace_id=' || NVL(l_trace_id, 'NULL'), 
+                            l_trace_id, l_span_id);
+                    EXCEPTION
+                        WHEN OTHERS THEN NULL;
+                    END;
+                    
+                ELSE
+                    -- Some other error
+                    l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                    log_error_internal('add_event', 'Event insert failed: ' || l_error_msg, NULL, l_span_id);
+                END IF;
         END;
-
-        -- ========================================================================
-        -- BACKEND SENDING WITH PULSE THROTTLING
-        -- ========================================================================
-        
-        -- Send to backend (this will respect pulse throttling internally)
-        send_to_backend(l_json);
-
-        IF g_autocommit THEN
-            COMMIT;
-        END IF;
-
-        -- ========================================================================
-        -- LOG VOLUME METRICS (SELF-MONITORING)
-        -- ========================================================================
-        
-        -- Record log volume metrics (sampled to avoid metric explosion)
-        IF should_process_telemetry('METRICS') AND MOD(EXTRACT(SECOND FROM SYSTIMESTAMP), 60) = 0 THEN
-            BEGIN
-                log_metric(
-                    p_metric_name => 'pltelemetry.logs.processed_by_level',
-                    p_value => 1,
-                    p_unit => 'logs',
-                    p_include_trace_correlation => FALSE
-                );
-                
-                -- Track pulse effectiveness on log volume
-                log_metric(
-                    p_metric_name => 'pltelemetry.logs.pulse_capacity',
-                    p_value => l_config.capacity_multiplier * 100,
-                    p_unit => 'percent',
-                    p_include_trace_correlation => FALSE
-                );
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL; -- Don't fail on self-monitoring
-            END;
-        END IF;
 
     EXCEPTION
         WHEN OTHERS THEN
             l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
-            
-            -- Ultimate fallback - direct insert to error table to avoid recursion
-            BEGIN
-                INSERT INTO plt_telemetry_errors (
-                    error_time,
-                    error_message,
-                    module_name
-                ) VALUES (
-                    SYSTIMESTAMP,
-                    'Critical error in send_log_internal (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg,
-                    'send_log_internal'
-                );
-                
-                IF g_autocommit THEN
-                    COMMIT;
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    NULL; -- Absolute last resort - don't fail
-            END;
-    END send_log_internal;
+            log_error_internal('add_event', 'Critical error in add_event: ' || l_error_msg, NULL, l_span_id);
+    END add_event;
+
+    /**
+    * Helper function to diagnose span-related issues
+    * Call this when troubleshooting span problems
+    */
+    FUNCTION diagnose_span_issue(p_span_id VARCHAR2) 
+    RETURN VARCHAR2
+    IS
+        l_result VARCHAR2(4000);
+        l_span_count NUMBER;
+        l_trace_id VARCHAR2(32);
+        l_span_status VARCHAR2(20);
+        l_start_time TIMESTAMP;
+        l_end_time TIMESTAMP;
+        l_events_count NUMBER;
+    BEGIN
+        -- Check plt_spans
+        BEGIN
+            SELECT COUNT(*), MAX(trace_id), MAX(status), MAX(start_time), MAX(end_time)
+            INTO l_span_count, l_trace_id, l_span_status, l_start_time, l_end_time
+            FROM plt_spans
+            WHERE span_id = p_span_id;
+        EXCEPTION
+            WHEN OTHERS THEN
+                RETURN 'Error querying plt_spans: ' || SQLERRM;
+        END;
+        
+        -- Check plt_events
+        BEGIN
+            SELECT COUNT(*)
+            INTO l_events_count
+            FROM plt_events
+            WHERE span_id = p_span_id;
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_events_count := -1;
+        END;
+        
+        -- Build result
+        l_result := 'Span ' || p_span_id || ' - ';
+        
+        IF l_span_count = 0 THEN
+            l_result := l_result || 'NOT FOUND in plt_spans';
+        ELSE
+            l_result := l_result || 'EXISTS (trace: ' || NVL(l_trace_id, 'NULL') || 
+                        ', status: ' || NVL(l_span_status, 'NULL') ||
+                        ', start: ' || TO_CHAR(l_start_time, 'HH24:MI:SS') ||
+                        ', end: ' || CASE WHEN l_end_time IS NULL THEN 'ACTIVE' 
+                                        ELSE TO_CHAR(l_end_time, 'HH24:MI:SS') END ||
+                        ', events: ' || l_events_count || ')';
+        END IF;
+        
+        RETURN l_result;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            RETURN 'Diagnostic failed: ' || SQLERRM;
+    END diagnose_span_issue;
+
 
     /**
      * Logs with explicit trace context
@@ -3661,6 +3421,670 @@ AS
             log_error_internal('update_job_interval_for_pulse', 
                 'Error updating job interval: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
     END update_job_interval_for_pulse;
+
+
+    -- =============================================================================
+    -- TELEMETRY ACTIVATION CHECKS - BODY IMPLEMENTATION
+    -- =============================================================================
+
+    /**
+    * Modified start_trace with activation check
+    */
+    FUNCTION start_trace (p_operation VARCHAR2)
+        RETURN VARCHAR2
+    IS
+        l_trace_id      VARCHAR2(32);
+        l_operation     VARCHAR2(255);
+        l_object_context VARCHAR2(200);
+        l_tenant_id     VARCHAR2(100);
+        l_environment   VARCHAR2(20);
+        l_should_trace  BOOLEAN;
+    BEGIN
+        -- Normalize operation name
+        l_operation := normalize_string(p_operation, p_max_length => 255, p_allow_null => FALSE);
+        
+        IF l_operation IS NULL OR LENGTH(l_operation) = 0 THEN
+            RAISE_APPLICATION_ERROR(-20102, 'Operation name cannot be null or empty');
+        END IF;
+        
+        -- Get current context
+        l_object_context := NVL(g_current_object_name, auto_detect_object_context());
+        l_tenant_id := NVL(g_current_tenant_id, 'default');
+        
+        -- CHECK ACTIVATION BEFORE CREATING TRACE
+        l_should_trace := PLT_ACTIVATION_MANAGER.should_generate_telemetry(
+            p_object_name => l_object_context,
+            p_telemetry_type => 'TRACE',
+            p_tenant_id => l_tenant_id
+        );
+        
+        -- Early return if tracing is disabled
+        IF NOT l_should_trace THEN
+            -- Return NULL instead of fake ID
+            RETURN NULL;
+        END IF;
+        
+        -- Original trace creation logic (existing code)
+        l_trace_id := generate_trace_id();
+        set_internal_trace_context(l_trace_id, NULL);
+        set_trace_context();
+
+        INSERT INTO plt_traces (
+            trace_id,
+            root_operation,
+            start_time,
+            service_name,
+            service_instance
+        ) VALUES (
+            l_trace_id,
+            l_operation,
+            SYSTIMESTAMP,
+            'oracle-plsql',
+            SYS_CONTEXT('USERENV', 'HOST') || ':' || SYS_CONTEXT('USERENV', 'INSTANCE_NAME')
+        );
+
+        IF g_autocommit THEN
+            COMMIT;
+        END IF;
+        
+        RETURN l_trace_id;
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('start_trace', 'Trace creation failed: ' || 
+                SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000), l_trace_id);
+            RETURN l_trace_id;
+    END start_trace;
+
+    /**
+    * Modified log_metric with activation check
+    */
+    PROCEDURE log_metric (
+        p_metric_name    VARCHAR2,
+        p_value          NUMBER,
+        p_unit           VARCHAR2 DEFAULT NULL,
+        p_attributes     t_attributes DEFAULT t_attributes(),
+        p_include_trace_correlation BOOLEAN DEFAULT TRUE
+    )
+    IS
+        l_object_context VARCHAR2(200);
+        l_tenant_id     VARCHAR2(100);
+        l_should_metric BOOLEAN;
+        l_sampling_rate NUMBER;
+        l_random_value  NUMBER;
+
+        l_json         VARCHAR2(32767);
+        l_attrs_json   VARCHAR2(4000);
+        l_error_msg    VARCHAR2(4000);
+        l_value_str    VARCHAR2(50);
+        l_metric_name  VARCHAR2(255);
+        l_unit         VARCHAR2(50);
+        l_trace_id     VARCHAR2(32);
+        l_span_id      VARCHAR2(16);
+        l_pulse_mode   VARCHAR2(10);
+        l_sampled      BOOLEAN := TRUE;
+        l_attrs_enhanced t_attributes;
+        l_attr_idx     NUMBER;
+    BEGIN
+        -- Get current context
+        l_object_context := NVL(g_current_object_name, auto_detect_object_context());
+        l_tenant_id := NVL(g_current_tenant_id, 'default');
+        
+        -- CHECK ACTIVATION BEFORE CREATING METRIC
+        l_should_metric := PLT_ACTIVATION_MANAGER.should_generate_telemetry(
+            p_object_name => l_object_context,
+            p_telemetry_type => 'METRIC',
+            p_tenant_id => l_tenant_id
+        );
+        
+        -- Early return if metrics are disabled
+        IF NOT l_should_metric THEN
+            RETURN;
+        END IF;
+        
+        -- ========================================================================
+        -- PULSE THROTTLING PRE-CHECKS
+        -- ========================================================================
+        
+        -- Check if metrics are enabled for current pulse mode
+        IF NOT should_process_telemetry('METRICS') THEN
+            -- In COMA mode or if metrics disabled, drop the metric silently
+            RETURN;
+        END IF;
+        
+        -- Get current pulse mode for context
+        l_pulse_mode := get_agent_pulse_mode();
+        
+        -- Apply dynamic sampling based on pulse mode
+        IF NOT should_sample_telemetry() THEN
+            -- Metric was sampled out - increment dropped counter if we can
+            BEGIN
+                -- Try to record a sampling metric (only if we're in a mode that allows it)
+                IF l_pulse_mode IN ('PULSE1', 'PULSE2') THEN
+                    -- Only track sampling stats in higher capacity modes to avoid recursion
+                    INSERT INTO plt_metrics (
+                        metric_name,
+                        metric_value,
+                        metric_unit,
+                        timestamp,
+                        attributes
+                    ) VALUES (
+                        'pltelemetry.sampling.dropped_metrics',
+                        1,
+                        'count',
+                        SYSTIMESTAMP,
+                        '{"pulse_mode":"' || l_pulse_mode || '","original_metric":"' || 
+                        REPLACE(SUBSTR(p_metric_name, 1, 100), '"', '\"') || '"}'
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on sampling stats
+            END;
+            
+            RETURN; -- Drop this metric due to sampling
+        END IF;
+
+        -- ========================================================================
+        -- EXISTING VALIDATION AND PROCESSING WITH ENHANCEMENTS
+        -- ========================================================================
+        
+        -- Normalize & validate input parameters (existing logic)
+        l_metric_name := normalize_string(p_metric_name, p_max_length => 255, p_allow_null => FALSE);
+        l_unit := normalize_string(p_unit, p_max_length => 50, p_allow_null => TRUE);
+        
+        IF l_metric_name IS NULL OR p_value IS NULL THEN
+            RETURN;
+        END IF;
+        
+        l_unit := NVL(l_unit, 'unit');
+
+        -- Conditional trace correlation (existing logic)
+        IF p_include_trace_correlation THEN
+            l_trace_id := g_current_trace_id;
+            l_span_id := g_current_span_id;
+        ELSE
+            l_trace_id := NULL;
+            l_span_id := NULL;
+        END IF;
+
+        -- ========================================================================
+        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Copy original attributes and add pulse context
+        l_attrs_enhanced := p_attributes;
+        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
+        
+        -- Add pulse mode context to all metrics
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add sampling rate for observability
+        DECLARE
+            l_config plt_pulse_config_t;
+        BEGIN
+            l_config := get_pulse_throttling_config(l_pulse_mode);
+            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.sampling_rate',
+                                            CASE 
+                                            WHEN l_config.sampling_rate = TRUNC(l_config.sampling_rate) THEN 
+                                                TO_CHAR(TRUNC(l_config.sampling_rate))  -- "1" para números enteros
+                                            ELSE 
+                                                TO_CHAR(l_config.sampling_rate, 'FM0.999999999')  -- "0.75" para decimales
+                                            END);
+            l_attr_idx := l_attr_idx + 1;
+            
+            -- Add capacity context for system monitoring
+            l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.capacity_multiplier',
+                                            CASE 
+                                            WHEN l_config.capacity_multiplier = TRUNC(l_config.capacity_multiplier) THEN 
+                                                TO_CHAR(TRUNC(l_config.capacity_multiplier))
+                                            ELSE 
+                                                TO_CHAR(l_config.capacity_multiplier, 'FM0.999999999')
+                                            END);
+        EXCEPTION
+            WHEN OTHERS THEN
+                -- Don't fail on pulse context addition
+                NULL;
+        END;
+
+        -- Convert enhanced attributes to JSON
+        l_attrs_json := attributes_to_json(l_attrs_enhanced);
+
+        -- ========================================================================
+        -- EXISTING JSON BUILDING AND SENDING LOGIC
+        -- ========================================================================
+        
+        -- Handle number formatting (existing logic)
+        BEGIN
+            l_value_str := NVL(RTRIM(TO_CHAR(p_value, 'FM99999999999990.999999'), '.'), '0');
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_value_str := '0';
+        END;
+
+        -- Build metric JSON - conditional trace/span fields (existing logic)
+        l_json := '{'
+            || '"name":"' || escape_json_string(l_metric_name) || '",'
+            || '"value":' || l_value_str || ','
+            || '"unit":"' || REPLACE(l_unit, '"', '\"') || '",'
+            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
+            || CASE WHEN l_trace_id IS NOT NULL THEN '"trace_id":"' || l_trace_id || '",' ELSE '' END
+            || CASE WHEN l_span_id IS NOT NULL THEN '"span_id":"' || l_span_id || '",' ELSE '' END
+            || '"attributes":' || l_attrs_json
+            || '}';
+
+        -- Validate JSON (existing logic)
+        IF l_json IS NOT JSON THEN
+            log_error_internal('log_metric', 'Invalid metric JSON generated for pulse mode: ' || l_pulse_mode);
+            RETURN;
+        END IF;
+
+        -- Log to metrics table (existing logic)
+        INSERT INTO plt_metrics (
+            metric_name,
+            metric_value,
+            metric_unit,
+            trace_id,
+            span_id,
+            timestamp,
+            attributes
+        ) VALUES (
+            l_metric_name,
+            p_value,
+            l_unit,
+            l_trace_id,  -- Can be NULL
+            l_span_id,   -- Can be NULL
+            SYSTIMESTAMP,
+            l_attrs_json
+        );
+
+        -- Send to backend (existing logic)
+        send_to_backend(l_json);
+
+        IF g_autocommit THEN
+            COMMIT;
+        END IF;
+
+    EXCEPTION
+        WHEN OTHERS THEN
+            l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+            log_error_internal('log_metric', 
+                'Metric error (Pulse: ' || get_agent_pulse_mode() || '): ' || l_error_msg);
+    END log_metric;
+
+    /**
+    * Modified send_log_internal with activation check
+    */
+    PROCEDURE send_log_internal(
+        p_trace_id   VARCHAR2,
+        p_span_id    VARCHAR2,
+        p_level      VARCHAR2,
+        p_message    VARCHAR2,
+        p_attributes t_attributes
+    )
+    IS
+        l_object_context VARCHAR2(200);
+        l_tenant_id     VARCHAR2(100);
+        l_should_log    BOOLEAN;
+
+        l_json         VARCHAR2(32767);
+        l_attrs_json   VARCHAR2(4000);
+        l_error_msg    VARCHAR2(4000);
+        l_trace_id     VARCHAR2(32);
+        l_span_id      VARCHAR2(16);
+        l_level        VARCHAR2(10);
+        l_message      VARCHAR2(4000);
+        l_pulse_mode   VARCHAR2(10);
+        l_config       plt_pulse_config_t;
+        l_should_sample BOOLEAN := TRUE;
+        l_level_priority NUMBER;
+        l_attrs_enhanced t_attributes;
+        l_attr_idx     NUMBER;
+        l_message_size NUMBER;
+    BEGIN
+        -- Get current context
+        l_object_context := NVL(g_current_object_name, auto_detect_object_context());
+        l_tenant_id := NVL(g_current_tenant_id, 'default');
+        
+        -- CHECK ACTIVATION BEFORE CREATING LOG
+        l_should_log := PLT_ACTIVATION_MANAGER.should_generate_telemetry(
+            p_object_name => l_object_context,
+            p_telemetry_type => 'LOG',
+            p_tenant_id => l_tenant_id,
+            p_log_level => p_level
+        );
+        
+        -- Early return if logging is disabled
+        IF NOT l_should_log THEN
+            RETURN;
+        END IF;
+        
+        -- ========================================================================
+        -- INPUT NORMALIZATION AND VALIDATION
+        -- ========================================================================
+        
+        -- Normalize & validate input parameters
+        l_trace_id := normalize_string(p_trace_id, p_max_length => 32, p_allow_null => TRUE);
+        l_span_id := normalize_string(p_span_id, p_max_length => 16, p_allow_null => TRUE);
+        l_level := normalize_string(p_level, p_max_length => 10, p_allow_null => FALSE);
+        l_message := normalize_string(p_message, p_max_length => 4000, p_allow_null => FALSE);
+        
+        IF l_level IS NULL OR l_message IS NULL THEN
+            RETURN;
+        END IF;
+
+        l_message_size := LENGTH(l_message);
+
+        -- ========================================================================
+        -- PULSE THROTTLING PRE-CHECKS
+        -- ========================================================================
+        
+        -- Get current pulse mode and configuration
+        l_pulse_mode := get_agent_pulse_mode();
+        l_config := get_pulse_throttling_config(l_pulse_mode);
+        
+        -- Check if logs are enabled for current pulse mode
+        IF l_config.logs_enabled = 'N' THEN
+            -- In COMA mode or if logs disabled, drop silently
+            RETURN;
+        END IF;
+        
+        -- ========================================================================
+        -- INTELLIGENT LOG LEVEL SAMPLING
+        -- ========================================================================
+        
+        -- Assign priority to log levels (higher number = more important)
+        l_level_priority := CASE UPPER(l_level)
+            WHEN 'TRACE' THEN 1
+            WHEN 'DEBUG' THEN 2
+            WHEN 'INFO' THEN 3
+            WHEN 'WARN' THEN 4
+            WHEN 'WARNING' THEN 4
+            WHEN 'ERROR' THEN 5
+            WHEN 'FATAL' THEN 6
+            ELSE 3  -- Default to INFO level
+        END;
+        
+        -- Apply intelligent sampling based on log level and pulse mode
+        CASE l_pulse_mode
+            WHEN 'PULSE1' THEN
+                -- Full capacity - sample all logs
+                l_should_sample := TRUE;
+                
+            WHEN 'PULSE2' THEN
+                -- 50% capacity - sample based on level and general sampling
+                l_should_sample := (l_level_priority >= 4) OR should_sample_telemetry();
+                
+            WHEN 'PULSE3' THEN
+                -- 25% capacity - only WARN+ guaranteed, others sampled
+                l_should_sample := (l_level_priority >= 4) OR 
+                                (l_level_priority >= 3 AND should_sample_telemetry());
+                
+            WHEN 'PULSE4' THEN
+                -- 10% capacity - only ERROR+ guaranteed, others heavily sampled
+                l_should_sample := (l_level_priority >= 5) OR 
+                                (l_level_priority >= 3 AND DBMS_RANDOM.VALUE(0, 1) <= 0.1);
+                
+            WHEN 'COMA' THEN
+                -- Hibernation - only FATAL guaranteed
+                l_should_sample := (l_level_priority >= 6);
+                
+            ELSE
+                l_should_sample := TRUE;
+        END CASE;
+        
+        -- Override: Always sample errors from PLTelemetry itself for debugging
+        IF UPPER(l_message) LIKE '%PLTELEMETRY%' AND l_level_priority >= 5 THEN
+            l_should_sample := TRUE;
+        END IF;
+        
+        -- Apply sampling decision
+        IF NOT l_should_sample THEN
+            -- Log was sampled out - track sampling stats (avoid recursion)
+            BEGIN
+                IF l_pulse_mode IN ('PULSE1', 'PULSE2') AND l_level_priority <= 3 THEN
+                    -- Only track sampling stats in higher capacity modes for low-priority logs
+                    INSERT INTO plt_logs (
+                        log_level,
+                        message,
+                        timestamp,
+                        attributes
+                    ) VALUES (
+                        'DEBUG',
+                        'Log sampling: dropped ' || UPPER(l_level) || ' log',
+                        SYSTIMESTAMP,
+                        '{"pulse_mode":"' || l_pulse_mode || '","original_level":"' || UPPER(l_level) || 
+                        '","message_size":' || l_message_size || '}'
+                    );
+                    
+                    IF g_autocommit THEN
+                        COMMIT;
+                    END IF;
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    NULL; -- Don't fail on sampling stats
+            END;
+            
+            RETURN; -- Drop this log due to sampling
+        END IF;
+
+        -- ========================================================================
+        -- ENHANCE ATTRIBUTES WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Copy original attributes and add pulse context
+        l_attrs_enhanced := p_attributes;
+        l_attr_idx := NVL(l_attrs_enhanced.LAST, 0) + 1;
+        
+        -- Add pulse mode context to logs
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.mode', l_pulse_mode);
+        l_attr_idx := l_attr_idx + 1;
+        
+        l_attrs_enhanced(l_attr_idx) := add_attribute('pulse.log_sampling_rate', 
+            TO_CHAR(l_config.sampling_rate, 'FM0.9999'));
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add log processing context
+        l_attrs_enhanced(l_attr_idx) := add_attribute('log.level_priority', TO_CHAR(l_level_priority));
+        l_attr_idx := l_attr_idx + 1;
+        
+        l_attrs_enhanced(l_attr_idx) := add_attribute('log.message_size', TO_CHAR(l_message_size));
+        l_attr_idx := l_attr_idx + 1;
+        
+        -- Add system context for correlation
+        l_attrs_enhanced(l_attr_idx) := add_attribute('system.processing_mode', get_processing_mode());
+
+        -- Convert enhanced attributes to JSON
+        l_attrs_json := attributes_to_json(l_attrs_enhanced);
+
+        -- ========================================================================
+        -- JSON BUILDING WITH PULSE CONTEXT
+        -- ========================================================================
+        
+        -- Build log JSON with enhanced attributes
+        l_json := '{'
+            || '"severity":"' || UPPER(l_level) || '",'
+            || '"message":"' || escape_json_string(l_message) || '",'
+            || '"timestamp":"' || TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"') || '",'
+            || CASE 
+                    WHEN l_trace_id IS NOT NULL AND LENGTH(l_trace_id) = 32 
+                    THEN '"trace_id":"' || l_trace_id || '",'
+                    ELSE ''
+                END
+            || CASE 
+                    WHEN l_span_id IS NOT NULL AND LENGTH(l_span_id) = 16 
+                    THEN '"span_id":"' || l_span_id || '",'
+                    ELSE ''
+                END
+            || '"attributes":' || l_attrs_json
+            || '}';
+
+        -- ========================================================================
+        -- DATABASE STORAGE WITH PULSE AWARENESS
+        -- ========================================================================
+        
+        -- Store in local logs table (always store, even if backend fails)
+        BEGIN
+            INSERT INTO plt_logs (
+                trace_id,
+                span_id, 
+                log_level,
+                message,
+                timestamp,
+                attributes
+            ) VALUES (
+                l_trace_id,
+                l_span_id,
+                UPPER(l_level),
+                l_message,
+                SYSTIMESTAMP,
+                l_attrs_json
+            );
+
+            -- Send to backend only if pulse mode allows it
+            send_to_backend(l_json);
+
+            IF g_autocommit THEN
+                COMMIT;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                l_error_msg := SUBSTR(DBMS_UTILITY.format_error_stack || ' - ' || DBMS_UTILITY.format_error_backtrace, 1, 4000);
+                -- Use plt_telemetry_errors as ultimate fallback (avoid recursion)
+                INSERT INTO plt_telemetry_errors (
+                    error_time,
+                    error_message,
+                    module_name
+                ) VALUES (
+                    SYSTIMESTAMP,
+                    'Failed to insert into plt_logs (Pulse: ' || l_pulse_mode || '): ' || l_error_msg,
+                    'send_log_internal'
+                );
+        END;
+        
+    END send_log_internal;
+
+    -- =============================================================================
+    -- 4. AUTO-DETECTION USING CALL STACK
+    -- =============================================================================
+
+    /**
+    * Auto-detect object context from call stack
+    * Add this to PLTelemetry package body
+    */
+    FUNCTION auto_detect_object_context RETURN VARCHAR2
+    IS
+        l_call_stack VARCHAR2(4000);
+        l_lines SYS.ODCIVARCHAR2LIST;
+        l_line VARCHAR2(1000);
+        l_object_name VARCHAR2(200);
+        l_pos1 NUMBER;
+        l_pos2 NUMBER;
+    BEGIN
+        -- Only auto-detect if enabled
+        IF NOT g_auto_detect_context THEN
+            RETURN 'UNKNOWN.CONTEXT';
+        END IF;
+        
+        -- Get call stack
+        l_call_stack := DBMS_UTILITY.FORMAT_CALL_STACK;
+        
+        -- Split into lines
+        l_lines := SYS.ODCIVARCHAR2LIST();
+        FOR i IN 1..REGEXP_COUNT(l_call_stack, CHR(10)) LOOP
+            l_line := REGEXP_SUBSTR(l_call_stack, '[^' || CHR(10) || ']+', 1, i);
+            IF l_line IS NOT NULL THEN
+                l_lines.EXTEND;
+                l_lines(l_lines.COUNT) := l_line;
+            END IF;
+        END LOOP;
+        
+        -- Look for first non-PLTelemetry procedure in stack
+        FOR i IN 1..l_lines.COUNT LOOP
+            l_line := l_lines(i);
+            
+            -- Skip PLTelemetry internal calls
+            IF INSTR(UPPER(l_line), 'PLTELEMETRY') = 0 
+            AND INSTR(UPPER(l_line), 'PLT_ACTIVATION') = 0 
+            AND INSTR(UPPER(l_line), 'PLT_OTLP') = 0 THEN
+                
+                -- Extract object.procedure from call stack line
+                -- Typical format: "  0xa1b2c3d4    SCHEMA.PACKAGE.PROCEDURE"
+                l_pos1 := INSTR(l_line, '.', 1, 1); -- First dot (schema.package)
+                l_pos2 := INSTR(l_line, '.', 1, 2); -- Second dot (package.procedure)
+                
+                IF l_pos1 > 0 AND l_pos2 > 0 THEN
+                    -- Extract PACKAGE.PROCEDURE
+                    l_object_name := TRIM(SUBSTR(l_line, l_pos1 + 1, l_pos2 - l_pos1 - 1)) || '.' ||
+                                    TRIM(SUBSTR(l_line, l_pos2 + 1));
+                    
+                    -- Clean up whitespace and hex addresses
+                    l_object_name := REGEXP_REPLACE(l_object_name, '\s+', '');
+                    l_object_name := REGEXP_REPLACE(l_object_name, '0x[0-9A-Fa-f]+', '');
+                    
+                    IF LENGTH(l_object_name) > 3 AND INSTR(l_object_name, '.') > 0 THEN
+                        RETURN UPPER(l_object_name);
+                    END IF;
+                END IF;
+            END IF;
+        END LOOP;
+        
+        -- Fallback to generic context
+        RETURN 'AUTO_DETECTED.UNKNOWN';
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('auto_detect_object_context', 
+                'Call stack detection failed: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+            RETURN 'DETECTION.ERROR';
+    END auto_detect_object_context;
+
+    /**
+    * Set current object context for activation checks
+    * Add this to PLTelemetry package body
+    */
+    PROCEDURE set_object_context(p_object_name VARCHAR2)
+    IS
+    BEGIN
+        g_current_object_name := UPPER(TRIM(p_object_name));
+        
+        -- Update session context for visibility
+        DBMS_APPLICATION_INFO.SET_CLIENT_INFO('OBJ:' || SUBSTR(g_current_object_name, 1, 60));
+        
+    EXCEPTION
+        WHEN OTHERS THEN
+            log_error_internal('set_object_context', 
+                'Failed to set object context: ' || SUBSTR(DBMS_UTILITY.format_error_stack, 1, 200));
+    END set_object_context;
+
+    /**
+    * Clear object context
+    * Add this to PLTelemetry package body
+    */
+    PROCEDURE clear_object_context
+    IS
+    BEGIN
+        g_current_object_name := NULL;
+        DBMS_APPLICATION_INFO.SET_CLIENT_INFO(NULL);
+    END clear_object_context;
+
+    /**
+    * Get current object context
+    * Add this to PLTelemetry package body
+    */
+    FUNCTION get_current_object_context RETURN VARCHAR2
+    IS
+    BEGIN
+        RETURN g_current_object_name;
+    END get_current_object_context;
+
+    
 
 END PLTelemetry;
 /

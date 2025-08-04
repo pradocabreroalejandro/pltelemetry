@@ -45,6 +45,7 @@ services:
       - "4318:4318"
       - "8888:8888"
       - "8889:8889"
+      - "13133:13133" # Health check
     depends_on:
       - tempo
       - loki
