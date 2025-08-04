@@ -2,17 +2,16 @@
   <img src="assets/PLT_logo.jpg" alt="PLTelemetry logo" width="200"/>
 </p>
 
+
 # PLTelemetry
 
-> **Evolving observability for Oracle ecosystems**
+> **Bringing observability to Oracle PL/SQL and legacy systems where standard tools don't reach**
 
-> PLTelemetry is a modern observability layer built specifically for Oracle environments — Forms, PL/SQL, and Reports — and designed to evolve.
-
-PLTelemetry brings distributed tracing, metrics, and structured logging to Oracle PL/SQL applications. It's designed to fill the observability gap where traditional OpenTelemetry agents can't reach - inside your database stored procedures, Oracle Forms, and Reports.
+PLTelemetry is a lightweight observability toolkit specifically designed for Oracle environments - PL/SQL packages, Oracle Forms, and Reports. It fills the gap where OpenTelemetry agents can't go: inside your database stored procedures and legacy applications.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Oracle](https://img.shields.io/badge/Oracle-11g%2B-red.svg)
-![Status](https://img.shields.io/badge/status-evolving%20rapidly-yellow.svg)
+![Oracle](https://img.shields.io/badge/Oracle-12c%2B-red.svg)
+![Status](https://img.shields.io/badge/status-production%20ready-green.svg)
 ![Oracle Forms](https://img.shields.io/badge/Oracle%20Forms-supported-orange.svg)
 ![Distributed Tracing](https://img.shields.io/badge/distributed%20tracing-ready-green.svg)
 ![Not affiliated with Oracle](https://img.shields.io/badge/affiliation-independent-blueviolet?logo=oracle&logoColor=white)
@@ -32,536 +31,373 @@ The author is **not an Oracle employee, partner, or representative**, and this s
 This project is provided “**as is**”, without any warranty. Use at your own discretion and risk, especially in production environments.
 
 
+## What PLTelemetry Actually Does
 
-## 🚀 What's New
+**Reality Check:** PLTelemetry is not trying to compete with DataDog or New Relic. It's a specialized tool for a specific problem: getting distributed tracing and structured observability out of Oracle PL/SQL environments.
 
-- 🧱 **Native Oracle 12c+ JSON everywhere** – no legacy hacks
-- 🏷️ **Enterprise-grade Tenant Context** – trace and analyze per tenant
-- 🔄 **Bridge Architecture Expanded** – simplified backend routing to OTLP/Postgres
-- 🧠 **Improved real-world examples** – built from actual usage patterns
-- 🚀 **Continuously evolving** – aggressive roadmap. You will find some inconsistencies in the examples while I'm making changes. Be warned!
+- **Distributed Tracing**: Correlate operations across Oracle Forms → PL/SQL → external APIs → Reports
+- **Structured Logging**: Get real logs with context from your stored procedures
+- **Business Metrics**: Track what matters in your Oracle applications
+- **Multi-tenant Support**: Separate telemetry by tenant/customer
+- **Lightweight**: Designed not to get in your way or slow things down
 
-## What It Does
+## The Architecture (Simple & Honest)
 
-PLTelemetry is not a replacement for OpenTelemetry - it's a **specialized implementation** that brings modern observability to Oracle PL/SQL environments where standard OTEL doesn't reach. Think of it as adding distributed tracing and structured logging to your stored procedures, Forms, and Reports. I'm just trying to prevent Oracle being a black box to OTEL in a light manner
+```
+Oracle PL/SQL → Queue Table → WoofyMetrics Agent → OTLP Collector → Grafana/Tempo
+     ↓                              ↓
+ Fallback to UTL_HTTP      Pulse Throttling System
+                                    ↓
+                         PULSE1 → PULSE2 → PULSE3 → PULSE4 → COMA
+```
 
-**Distributed tracing across your Oracle stack:**
+**Primary Flow**: PL/SQL writes to queue, WoofyMetrics processes asynchronously
+**Pulse System**: Adaptive throttling based on system heat (CPU/Memory)
+**Failover Logic**: Automatic detection and switching, no data loss
+
+### Pulse Throttling System
+
+PLTelemetry includes an intelligent **Pulse Throttling System** that automatically adapts processing intensity based on system load:
+
+| Mode | Capacity | Batch Size | Description | Trigger |
+|------|----------|------------|-------------|---------|
+| **PULSE1** | 100% | Full | Maximum performance | Heat < 30% |
+| **PULSE2** | 50% | Half | Moderate throttling | Heat 30-50% |
+| **PULSE3** | 25% | Quarter | Reduced processing | Heat 50-70% |
+| **PULSE4** | 10% | Minimal | Emergency throttling | Heat 70-90% |
+| **COMA** | 0% | None | System hibernation | Heat > 90% |
+
+**Heat Calculation**: Weighted combination of CPU (60%) and Memory (40%) usage
+**Failover Integration**: PULSE4/COMA modes automatically trigger Oracle fallback
+**Hysteresis**: 5% margin prevents mode flapping
+
+## What's Actually Implemented
+
+### ✅ Production Ready
+- **Core PLTelemetry Package**: Full distributed tracing with spans, events, attributes
+- **OTLP Bridge**: Native Oracle 12c+ JSON integration with Tempo/Jaeger/Grafana
+- **WoofyMetrics Agent**: Async processing with circuit breakers, throttling, and health monitoring
+- **Pulse Throttling System**: Adaptive system protection with 5 throttling modes (PULSE1→COMA)
+- **Intelligent Failover**: Automatic agent health detection with Oracle fallback integration
+- **Oracle Forms Integration**: Complete tracing across Forms workflows
+- **Activation Manager**: Granular control over what gets traced (wildcards, sampling, tenant isolation)
+- **Multi-tenant Support**: Tenant-aware tracing and filtering
+
+### 🚧 In Development
+- External queue processing agents in other languages
+- Advanced sampling strategies
+- Performance benchmarking suite
+
+### ❌ Not Implemented (Yet)
+- PostgreSQL bridge (referenced but not complete)
+- Elasticsearch bridge (planned)
+- Full APEX integration (possible but not tested)
+
+## Quick Start
+
+### 1. Install Core Package
 ```sql
--- Oracle Forms starts a trace
-l_trace_id := PLTelemetry.start_trace('customer_order_process');
-
--- Continues in PL/SQL API
-l_span_id := PLTelemetry.continue_distributed_trace(
-    p_trace_id => l_trace_id,
-    p_operation => 'validate_customer_data'
-);
-
--- All correlated in your observability platform
-PLTelemetry.end_span(l_span_id, 'OK');
-```
-
-## Real-World Distributed Tracing
-
-**Complete Oracle ecosystem observability:**
-
-```
-Oracle Forms → PL/SQL API → Oracle Reports → Node.js → Oracle Forms
-      ↓             ↓              ↓           ↓           ↓
-   trace_id ══════════════════ same trace_id ══════════════
-              
-              All visible in Grafana/Tempo as one unified trace
-```
-
-### Example: Order Processing Flow
-
-```sql
--- In Oracle Forms (trigger)
-DECLARE
-    l_trace_id VARCHAR2(32);
-    l_span_id VARCHAR2(16);
-BEGIN
-    -- Configure PLTelemetry (one-time setup)
-    PLTelemetry.set_backend_url('OTLP_BRIDGE');
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
-    PLT_OTLP_BRIDGE.set_service_info('oracle-forms-erp', '2.1.0');
-    
-    -- Start distributed trace
-    l_trace_id := PLTelemetry.start_trace('order_processing');
-    l_span_id := PLTelemetry.start_span('forms_validation');
-    
-    -- Add business context
-    DECLARE
-        l_attrs PLTelemetry.t_attributes;
-    BEGIN
-        l_attrs(1) := PLTelemetry.add_attribute('form.name', 'ORDER_ENTRY');
-        l_attrs(2) := PLTelemetry.add_attribute('user.id', USER);
-        l_attrs(3) := PLTelemetry.add_attribute('customer.id', :ORDER.CUSTOMER_ID);
-        PLTelemetry.add_event(l_span_id, 'validation_started', l_attrs);
-    END;
-    
-    -- Your existing Forms logic
-    validate_order_data();
-    
-    PLTelemetry.end_span(l_span_id, 'OK');
-    
-    -- Call PL/SQL API, passing the trace_id
-    l_result := ORDER_API.process_order(
-        p_customer_id => :ORDER.CUSTOMER_ID,
-        p_trace_id => l_trace_id  -- Distributed tracing magic
-    );
-    
-    PLTelemetry.end_trace(l_trace_id);
-END;
-```
-
-```sql
--- In PL/SQL API (database package)
-FUNCTION process_order(
-    p_customer_id NUMBER,
-    p_trace_id VARCHAR2
-) RETURN VARCHAR2
-IS
-    l_span_id VARCHAR2(16);
-BEGIN
-    -- Continue the distributed trace from Forms
-    l_span_id := PLTelemetry.continue_distributed_trace(
-        p_trace_id => p_trace_id,
-        p_operation => 'database_order_processing'
-    );
-    
-    -- Add database-specific context
-    PLTelemetry.log_distributed(
-        p_trace_id => p_trace_id,
-        p_level => 'INFO',
-        p_message => 'Processing order in database',
-        p_system => 'ORACLE_DB'
-    );
-    
-    -- Your business logic with observability
-    PLTelemetry.add_event(l_span_id, 'inventory_check_start');
-    
-    IF check_inventory(p_customer_id) THEN
-        PLTelemetry.add_event(l_span_id, 'inventory_available');
-        -- Process order...
-        PLTelemetry.log_metric('orders.processed', 1, 'count');
-        PLTelemetry.end_span(l_span_id, 'OK');
-        RETURN 'SUCCESS';
-    ELSE
-        PLTelemetry.add_event(l_span_id, 'inventory_insufficient');
-        PLTelemetry.end_span(l_span_id, 'ERROR');
-        RETURN 'INSUFFICIENT_INVENTORY';
-    END IF;
-    
-EXCEPTION
-    WHEN OTHERS THEN
-        PLTelemetry.log_distributed(
-            p_trace_id => p_trace_id,
-            p_level => 'ERROR',
-            p_message => 'Order processing failed: ' || SQLERRM,
-            p_system => 'ORACLE_DB'
-        );
-        PLTelemetry.end_span(l_span_id, 'ERROR');
-        RETURN 'ERROR: ' || SQLERRM;
-END process_order;
-```
-
-**Result**: A complete timeline showing the entire journey from Forms button click to database completion, all correlated by trace_id and visible in Grafana/Tempo.
-
-## Architecture
-
-<p align="center">
-  <img src="assets/architecture.png" alt="Architecture"/>
-</p>
-
-
-PLTelemetry generates OpenTelemetry-compatible JSON and uses "bridges" to send data to different observability platforms.
-
-## Available Bridges
-
-| Bridge | Status | Best For | Production Use |
-|--------|--------|----------|---------------|
-| **OTLP** | ✅ Production | Grafana, Tempo, Jaeger, Prometheus | ✅ Tested in enterprise |
-| **PostgreSQL** | ✅ Production | Custom analysis, SQL dashboards | ✅ Tested in enterprise |
-
-You might argue why not to generate OTEL from the beggining. There are good reasons for that:
-- To avoid complex JSON, as you can rely in an external agent to do the transformation
-- To have, somehow, a frozen standar and make the changes in the briges, not in the Core and its generated data
-
-## Quick Start with Grafana Stack (Recommended)
-
-The OTLP bridge connects PLTelemetry to Tempo, giving you distributed tracing visualization that works with your existing Grafana setup.
-
-### 1. Install PLTelemetry Core
-
-```sql
--- Install the core package
+-- Install as PLTELEMETRY user
 @src/PLTelemetry.pks
 @src/PLTelemetry.pkb
-
--- Install database tables
 @install/tables/plt_tables.sql
-@install/tables/plt_indexes.sql
 ```
 
 ### 2. Install OTLP Bridge
-
 ```sql
--- Install the OTLP bridge
 @bridges/OTLP/PLT_OTLP_BRIDGE.pks
 @bridges/OTLP/PLT_OTLP_BRIDGE.pkb
 ```
 
-### 3. Configure (Required)
-
+### 3. Configure
 ```sql
 BEGIN
-    -- MANDATORY: Tell PLTelemetry to use the OTLP bridge
+    -- Tell PLTelemetry to use OTLP
     PLTelemetry.set_backend_url('OTLP_BRIDGE');
     
-    -- MANDATORY: Set your Tempo endpoint
+    -- Point to your Tempo/Jaeger endpoint
     PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
     
-    -- RECOMMENDED: Identify your service
-    PLT_OTLP_BRIDGE.set_service_info('your-oracle-app', '1.0.0');
-    
-    -- OPTIONAL: Performance tuning
-    PLTelemetry.set_async_mode(FALSE);  -- TRUE for background processing
-    PLT_OTLP_BRIDGE.set_debug_mode(FALSE);  -- TRUE for troubleshooting
+    -- Identify your service
+    PLT_OTLP_BRIDGE.set_service_info('oracle-app', '1.0.0');
 END;
 /
 ```
 
-### 4. Start Observing
-
-**Simple single-system tracing:**
+### 4. Start Tracing
 ```sql
 DECLARE
     l_trace_id VARCHAR2(32);
     l_span_id VARCHAR2(16);
 BEGIN
-    -- Create a trace
-    l_trace_id := PLTelemetry.start_trace('user_registration');
-    l_span_id := PLTelemetry.start_span('validate_email');
+    -- Simple tracing
+    l_trace_id := PLTelemetry.start_trace('process_order');
+    l_span_id := PLTelemetry.start_span('validate_customer');
     
-    -- Add events and context
-    PLTelemetry.add_event(l_span_id, 'validation_started');
+    -- Your business logic here
+    validate_customer_data(p_customer_id);
     
-    -- Your business logic
-    validate_email_format(p_email);
-    
-    PLTelemetry.add_event(l_span_id, 'validation_completed');
     PLTelemetry.end_span(l_span_id, 'OK');
     PLTelemetry.end_trace(l_trace_id);
 END;
 /
 ```
 
-**Distributed tracing across systems:**
+## Real-World Example: Oracle Forms to PL/SQL
+
+**Oracle Forms (button trigger):**
 ```sql
--- System A (Oracle Forms) starts trace
-l_trace_id := PLTelemetry.start_trace('cross_system_operation');
-
--- System B (PL/SQL) continues trace
-l_span_id := PLTelemetry.continue_distributed_trace(
-    p_trace_id => l_trace_id,
-    p_operation => 'database_processing'
-);
-
--- System C (Reports) continues same trace
--- All operations appear in the same timeline in Grafana
-```
-
-## Core Features
-
-### Distributed Tracing
-- **128-bit Trace IDs**: OpenTelemetry-compatible trace correlation
-- **Cross-System Tracing**: Pass trace context between Forms, PL/SQL, Reports, and external APIs
-- **Timeline Events**: Add contextual events within spans for detailed observability
-- **Parent-Child Relationships**: Nested operations with proper hierarchy
-- **Status Propagation**: OK, ERROR, CANCELLED with proper OTLP mapping
-
-### Enhanced for Oracle Ecosystem
-- **Oracle Forms Integration**: Full support for Forms-based applications
-- **Oracle Reports Support**: Trace report generation and processing, as long as you use any kind of PLSQL in the report (triggers at least)
-- **Database API Tracing**: Instrument your PL/SQL packages and procedures
-- **Multi-Tenant Support**: Trace and correlate data across different tenants
-- **Error Correlation**: Automatic linking of errors to traces for faster debugging
-
-### Metrics Collection
-- **Business Metrics**: Track orders processed, customers served, revenue, etc.
-- **Performance Metrics**: Response times, database query durations, batch processing rates
-- **Trace-Correlated Metrics**: Automatically link metrics to active traces
-- **Multiple Units**: Support for ms, bytes, requests, percentages, currency
-
-### Structured Logging
-- **Severity Levels**: TRACE, DEBUG, INFO, WARN, ERROR, FATAL
-- **Distributed Logging**: Logs automatically correlated to traces across systems
-- **Contextual Data**: Key-value attributes with proper JSON escaping
-- **System Identification**: Automatic tagging of log source (Forms, PL/SQL, Reports)
-
-### Production-Ready Features
-- **Async Processing**: Queue-based export to minimize performance impact [I have a go agent that I will make public as soon as it is completed]
-- **Error Isolation**: Telemetry failures never break business logic
-- **Memory Efficient**: Automatic VARCHAR2/CLOB switching for large payloads
-- **Configurable Timeouts**: Prevent hanging connections
-- **Bridge Architecture**: Easy to add new observability backends
-
-## Real-World Use Cases
-
-### Oracle Forms Application Monitoring
-```sql
--- In WHEN-BUTTON-PRESSED trigger
 DECLARE
     l_trace_id VARCHAR2(32);
-    l_span_id VARCHAR2(16);
 BEGIN
-    -- Configure telemetry (one-time setup)
-    configure_telemetry();
-    
-    -- Start tracing the user workflow
+    -- Start trace in Forms
     l_trace_id := PLTelemetry.start_trace('customer_lookup');
-    l_span_id := PLTelemetry.start_span('form_validation');
     
-    -- Add user context
-    DECLARE
-        l_attrs PLTelemetry.t_attributes;
-    BEGIN
-        l_attrs(1) := PLTelemetry.add_attribute('form.name', 'CUSTOMER_SEARCH');
-        l_attrs(2) := PLTelemetry.add_attribute('user.id', USER);
-        l_attrs(3) := PLTelemetry.add_attribute('search.criteria', :SEARCH.CUSTOMER_NAME);
-        PLTelemetry.add_event(l_span_id, 'search_initiated', l_attrs);
-    END;
-    
-    -- Call database API with trace context
-    l_result := CUSTOMER_API.search_customers(
+    -- Call PL/SQL API with trace context
+    l_result := CUSTOMER_API.search(
         p_name => :SEARCH.CUSTOMER_NAME,
-        p_trace_id => l_trace_id
+        p_trace_id => l_trace_id  -- Pass trace context
     );
-    
-    -- Measure and log results
-    IF l_result = 'SUCCESS' THEN
-        PLTelemetry.add_event(l_span_id, 'search_completed');
-        PLTelemetry.log_metric('customer_searches.success', 1, 'count');
-        PLTelemetry.end_span(l_span_id, 'OK');
-    ELSE
-        PLTelemetry.add_event(l_span_id, 'search_failed');
-        PLTelemetry.end_span(l_span_id, 'ERROR');
-    END IF;
     
     PLTelemetry.end_trace(l_trace_id);
 END;
 ```
 
-### End-to-End Transaction Monitoring
+**PL/SQL Package:**
 ```sql
--- Track complete business transactions across multiple systems
--- Forms → PL/SQL → External API → Reports → Forms
-
--- 1. Forms initiates
-l_trace_id := PLTelemetry.start_trace('order_fulfillment');
-
--- 2. PL/SQL processes
-FUNCTION process_order(p_trace_id VARCHAR2) RETURN VARCHAR2 IS
+FUNCTION search(p_name VARCHAR2, p_trace_id VARCHAR2) RETURN VARCHAR2 IS
     l_span_id VARCHAR2(16);
 BEGIN
+    -- Continue the trace from Forms
     l_span_id := PLTelemetry.continue_distributed_trace(
         p_trace_id => p_trace_id,
-        p_operation => 'inventory_allocation'
+        p_operation => 'database_search'
     );
     
-    -- Call external inventory system
-    l_context := PLTelemetry.get_trace_context();
-    call_external_api(
-        p_endpoint => 'http://inventory-api/allocate',
-        p_trace_context => l_context
-    );
+    -- Your search logic
+    perform_customer_search(p_name);
     
     PLTelemetry.end_span(l_span_id, 'OK');
     RETURN 'SUCCESS';
 END;
-
--- 3. Reports generates invoice (with same trace_id)
--- 4. All steps visible as one timeline in Grafana
 ```
 
-### Performance Analysis
+**Result**: Complete timeline in Grafana showing Forms button click → database search, all correlated by trace ID.
+
+## Performance & Overhead
+
+**Honest Assessment:**
+- **Async Mode**: ~1-2ms overhead per telemetry call (queued for background processing)
+- **Sync Mode**: 10-50ms per call (immediate HTTP sending)
+- **Memory**: Minimal - uses VARCHAR2/CLOB switching based on payload size
+- **Network**: HTTP/1.1 with connection pooling
+- **Error Isolation**: Telemetry failures never break your business logic
+
+**Production Settings:**
 ```sql
--- Identify slow operations across your Oracle stack
-DECLARE
-    l_span_id VARCHAR2(16);
-    l_start_time TIMESTAMP := SYSTIMESTAMP;
-BEGIN
-    l_span_id := PLTelemetry.start_span('complex_calculation');
-    
-    -- Your existing slow operation
-    perform_complex_business_logic();
-    
-    -- Measure actual duration
-    PLTelemetry.log_metric(
-        'calculation_duration_ms',
-        EXTRACT(SECOND FROM (SYSTIMESTAMP - l_start_time)) * 1000,
-        'ms'
-    );
-    
-    PLTelemetry.end_span(l_span_id, 'OK');
-END;
-/
-```
-
-### Error Tracking and Correlation
-```sql
--- Capture errors with full context across distributed systems
-DECLARE
-    l_span_id VARCHAR2(16);
-    l_attrs PLTelemetry.t_attributes;
-BEGIN
-    l_span_id := PLTelemetry.start_span('payment_processing');
-    
-    BEGIN
-        process_payment(p_amount, p_card_token);
-        PLTelemetry.end_span(l_span_id, 'OK');
-    EXCEPTION
-        WHEN OTHERS THEN
-            -- Capture error with full context
-            l_attrs(1) := PLTelemetry.add_attribute('error.message', SQLERRM);
-            l_attrs(2) := PLTelemetry.add_attribute('error.code', TO_CHAR(SQLCODE));
-            l_attrs(3) := PLTelemetry.add_attribute('payment.amount', TO_CHAR(p_amount));
-            l_attrs(4) := PLTelemetry.add_attribute('customer.id', TO_CHAR(p_customer_id));
-            
-            PLTelemetry.log_distributed(
-                p_trace_id => PLTelemetry.get_current_trace_id(),
-                p_level => 'ERROR',
-                p_message => 'Payment processing failed: ' || SQLERRM,
-                p_system => 'PAYMENT_ENGINE'
-            );
-            
-            PLTelemetry.end_span(l_span_id, 'ERROR', l_attrs);
-            RAISE; -- Don't swallow the original error
-    END;
-END;
-/
-```
-
-## Integration with Modern Observability
-
-### Grafana + Tempo Setup
-```yaml
-# docker-compose.yml for local development
-version: '3.8'
-services:
-  tempo:
-    image: grafana/tempo:latest
-    command: [ "-config.file=/etc/tempo.yaml" ]
-    ports:
-      - "3200:3200"   # Tempo API
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver (PLTelemetry uses this)
-    volumes:
-      - ./tempo.yaml:/etc/tempo.yaml
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-    volumes:
-      - grafana-storage:/var/lib/grafana
-
-volumes:
-  grafana-storage:
-```
-
-### Searching Your Traces
-Once configured, you can search your Oracle application traces in Grafana:
-
-```bash
-# Search by service
-{.service.name="oracle-forms-erp"}
-
-# Search by operation
-{.name="order_processing"}
-
-# Search by customer
-{.customer.id="12345"}
-
-# Search by error status
-{.status="ERROR"}
-
-# Search by trace ID directly
-d60b2ad673a213990ebfb38c4273b172
-```
-
-### Creating Dashboards
-Use the PostgreSQL bridge for custom dashboards:
-```sql
--- Query your telemetry data directly
-SELECT 
-    trace_id,
-    operation_name,
-    duration_ms,
-    status,
-    start_time
-FROM plt_spans 
-WHERE start_time > CURRENT_DATE - 1
-  AND status = 'ERROR'
-ORDER BY duration_ms DESC;
+-- Recommended for high-volume systems
+PLTelemetry.set_async_mode(TRUE);
+PLT_ACTIVATION_MANAGER.set_global_sampling_rate(0.1); -- 10% sampling
 ```
 
 ## Configuration Options
 
-### Basic Configuration
+### Basic Setup
 ```sql
 -- Backend routing
 PLTelemetry.set_backend_url('OTLP_BRIDGE');
 
 -- Processing mode
-PLTelemetry.set_async_mode(TRUE);   -- FALSE for immediate sending
-PLTelemetry.set_autocommit(FALSE);  -- TRUE to commit after each operation
+PLTelemetry.set_async_mode(TRUE);   -- Background processing
+PLTelemetry.set_autocommit(FALSE);  -- Manual transaction control
 
--- OTLP Bridge settings
+-- OTLP endpoint
 PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
-PLT_OTLP_BRIDGE.set_service_info('your-app', '1.0.0', 'prod');
-PLT_OTLP_BRIDGE.set_timeout(30);
+PLT_OTLP_BRIDGE.set_service_info('your-app', '1.0.0');
 ```
 
-### Advanced Configuration
+### Activation Control
 ```sql
--- Performance tuning
-PLT_OTLP_BRIDGE.set_native_json_mode(TRUE);  -- Use Oracle 12c+ JSON functions
+-- Enable tracing for specific packages
+PLT_ACTIVATION_MANAGER.enable_telemetry(
+    p_object_name => 'CUSTOMER_PKG.*',
+    p_telemetry_type => 'TRACE',
+    p_sampling_rate => 0.1
+);
 
--- Debugging
-PLT_OTLP_BRIDGE.set_debug_mode(TRUE);        -- Enable detailed logging
-
--- Multi-tenant setup
-PLT_OTLP_BRIDGE.set_service_info(
-    p_service_name => 'erp-system',
-    p_service_version => '2.1.0',
+-- Enable only for specific tenant
+PLT_ACTIVATION_MANAGER.enable_telemetry(
+    p_object_name => 'ORDER_PROCESSING.*',
+    p_telemetry_type => 'TRACE',
     p_tenant_id => 'customer_abc'
 );
 ```
 
-## Performance Impact
+## Multi-Tenant Support
 
-PLTelemetry is designed for production use with minimal overhead:
+PLTelemetry includes built-in multi-tenancy:
 
-- **Async Mode**: < 1ms per telemetry operation (queued for background processing)
-- **Sync Mode**: 10-50ms per operation (immediate sending)
-- **Memory Efficient**: Automatic VARCHAR2/CLOB switching based on payload size
-- **Error Isolated**: Telemetry failures never affect business logic
-- **Network Optimized**: HTTP/1.1 with keep-alive and configurable timeouts
-
-### Recommended Settings
 ```sql
--- For high-volume production systems
-PLTelemetry.set_async_mode(TRUE);
-PLTelemetry.set_autocommit(FALSE);
-PLT_OTLP_BRIDGE.set_native_json_mode(TRUE);
+-- Set tenant context
+PLTelemetry.set_tenant_context('customer_123', 'ACME Corp');
 
--- For development/debugging
-PLTelemetry.set_async_mode(FALSE);
-PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
+-- All telemetry automatically tagged with tenant info
+l_trace_id := PLTelemetry.start_trace('tenant_operation');
+
+-- Search traces by tenant in Grafana
+{.tenant.id="customer_123"}
 ```
+
+## WoofyMetrics Agent with Pulse Throttling (Recommended)
+
+For high-volume environments, use the included **WoofyMetrics Agent** with intelligent system protection:
+
+```yaml
+# config.yaml - WoofyMetrics Agent Configuration
+oracle:
+  dsn: "${ORACLE_DSN}"
+  maxConnections: 10
+  maxIdle: 5
+  connTimeout: "30s"
+  queryTimeout: "60s"
+  
+otlp:
+  endpoint: "${OTLP_ENDPOINT:-http://localhost:4318}"
+  timeout: "30s"
+  retryCount: 3
+  retryDelay: "1s"
+  maxBodySize: 1048576  # 1MB
+  rateLimit: 1000.0     # requests per second
+  rateBurst: 50
+  
+processing:
+  batchSize: 100
+  pollInterval: "5s"
+  maxErrors: 5
+  retryDelay: "30s"
+  tenantFilter: ""      # empty = process all tenants
+  
+agent:
+  healthPort: 8080
+  logLevel: "info"
+  enableDebug: false
+  
+# Pulse Mode Throttling - Thermal-like CPU/Memory management
+throttling:
+  enabled: true
+  
+  # Heat thresholds (0.0 - 1.0)
+  pulse1MaxHeat: 0.3    # 30% - enter moderate throttling
+  pulse2MaxHeat: 0.5    # 50% - half capacity
+  pulse3MaxHeat: 0.7    # 70% - quarter capacity  
+  pulse4MaxHeat: 0.9    # 90% - emergency mode
+  
+  # Heat calculation weights
+  cpuWeight: 0.6        # CPU influence (60%)
+  memoryWeight: 0.4     # Memory influence (40%)
+  
+  # Behavior tuning
+  heatCheckInterval: "30s"      # Monitor every 30 seconds
+  cooldownFactor: 0.95          # 5% heat dissipation per check
+  hysteresisMargin: 0.05        # 5% margin prevents flapping
+```
+
+### How Pulse Throttling Works
+
+**WoofyMetrics Agent** continuously monitors system resources and automatically adjusts processing:
+
+**Normal Operation** (PULSE1):
+- Processes 100 items every 5 seconds
+- Full telemetry collection
+- Maximum performance
+
+**System Under Load** (PULSE3):
+- Reduces to 25 items every 20 seconds
+- 50% sampling rate
+- Gentler on resources
+
+**Emergency Mode** (COMA):
+- Suspends all telemetry processing
+- Forces Oracle fallback activation
+- Self-metrics only for monitoring
+
+**Example WoofyMetrics Output:**
+```
+💓 System Pulse Changed from_mode=pulse1 to_mode=pulse3 system_heat=0.72 threshold_exceeded=0.7
+🔄 Activating Oracle fallback due to PULSE4 mode - Agent stepping back
+🛑 Pulse Throttler stopped
+```
+
+### Failover Integration
+
+The pulse system seamlessly integrates with PLTelemetry's failover mechanism:
+
+1. **High System Load**: WoofyMetrics detects CPU/Memory pressure
+2. **Automatic Throttling**: Reduces processing to protect system
+3. **Emergency Failover**: PULSE4/COMA modes trigger Oracle fallback
+4. **Graceful Recovery**: When load decreases, WoofyMetrics resumes control
+
+This ensures your Oracle database is never overwhelmed by telemetry processing.
+
+## Requirements
+
+### Database
+- Oracle Database 12c+ (uses native JSON functions)
+- Required privileges: `UTL_HTTP`, `CREATE TABLE`, `CREATE PROCEDURE`
+
+### Network
+- HTTP access to your OTLP collector (Tempo, Jaeger, etc.)
+- Proper ACL configuration for outbound connections
+
+### Grants Setup
+```sql
+-- Run as DBA
+GRANT EXECUTE ON UTL_HTTP TO pltelemetry_user;
+
+-- Network ACL for outbound HTTP
+BEGIN
+  DBMS_NETWORK_ACL_ADMIN.CREATE_ACL(
+    acl => 'pltelemetry_acl.xml',
+    description => 'PLTelemetry HTTP access',
+    principal => 'PLTELEMETRY_USER',
+    is_grant => TRUE,
+    privilege => 'connect'
+  );
+  
+  DBMS_NETWORK_ACL_ADMIN.ASSIGN_ACL(
+    acl => 'pltelemetry_acl.xml',
+    host => 'your-tempo-host',
+    lower_port => 4318,
+    upper_port => 4318
+  );
+END;
+/
+```
+
+## Limitations & Honest Assessment
+
+**What PLTelemetry is NOT:**
+- Not a replacement for APM tools like DataDog or New Relic
+- Not suitable for high-frequency tracing (thousands of traces/second)
+- Not a general-purpose observability platform
+- PostgreSQL bridge exists in name only (not implemented)
+
+**What PLTelemetry IS:**
+- A specialized tool for Oracle/legacy observability
+- Lightweight and non-intrusive
+- Production-ready for moderate workloads
+- Focused on solving specific pain points
+
+**Performance Limitations:**
+- Oracle UTL_HTTP is not the fastest HTTP client
+- JSON parsing in PL/SQL has overhead  
+- Not optimized for extreme high-volume scenarios
+- Pulse throttling activates protective measures under load
+
+**Smart Adaptations:**
+- Automatically throttles when system is under pressure
+- Intelligent failover ensures no data loss
+- Pulse system protects Oracle database from being overwhelmed
 
 ## Troubleshooting
 
@@ -569,328 +405,66 @@ PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
 ```sql
 -- Verify configuration
 SELECT PLTelemetry.get_backend_url() FROM DUAL;
-SELECT PLTelemetry.get_current_trace_id() FROM DUAL;
 
--- Check queue status (if using async mode)
-SELECT COUNT(*) as pending_exports FROM plt_queue WHERE processed = 'N';
+-- Check for errors
+SELECT * FROM plt_telemetry_errors WHERE error_time > SYSDATE - 1/24;
 
--- Check for recent errors
-SELECT error_time, error_message, module_name 
-FROM plt_telemetry_errors 
-WHERE error_time > SYSDATE - 1/24  -- Last hour
-ORDER BY error_time DESC;
+-- Queue status (if using async)
+SELECT COUNT(*) FROM plt_queue WHERE processed = 'N';
 ```
 
 ### Common Issues
 
-#### Traces not appearing in Grafana
-1. **Check network connectivity**: Can Oracle reach your Tempo endpoint?
-2. **Verify timestamps**: Oracle and Grafana should have synchronized time
-3. **Check Tempo configuration**: Is the OTLP receiver enabled on port 4318?
+1. **No traces in Grafana**: Check network connectivity and Tempo configuration
+2. **Performance issues**: Enable async mode and adjust sampling rates  
+3. **System overload**: Check pulse throttling modes - agent may be in COMA mode
+4. **ACL errors**: Verify UTL_HTTP grants and network ACL setup
+5. **Agent failover**: Check `plt_agent_registry` table for heartbeat status
+
+### Monitoring System Health
 
 ```sql
--- Debug what's being sent
-PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
+-- Check current pulse mode and system status
+SELECT 
+    config_key,
+    config_value,
+    updated_at
+FROM plt_failover_config
+WHERE config_key IN ('PROCESSING_MODE', 'AGENT_PULSE_MODE');
 
--- Manual test
-BEGIN
-    PLT_OTLP_BRIDGE.route_to_otlp('{"trace_id":"test123","span_id":"span123","operation_name":"test","status":"OK"}');
-END;
-/
+-- Monitor agent health
+SELECT 
+    agent_id,
+    last_heartbeat,
+    status_message,
+    items_processed
+FROM plt_agent_registry;
+
+-- Check throttling effectiveness
+SELECT 
+    metric_time,
+    batch_size,
+    items_processed,
+    avg_latency_ms
+FROM plt_fallback_metrics
+WHERE metric_time > SYSDATE - 1/24;
 ```
-
-#### Performance issues
-```sql
--- Check queue backlog
-SELECT process_attempts, COUNT(*) 
-FROM plt_queue 
-WHERE processed = 'N' 
-GROUP BY process_attempts;
-
--- Process queue manually if needed
-PLTelemetry.process_queue(100);
-```
-
-#### Note: 
-I am currently evaluating the performance degradation by letting the queue grow. Just to get a trend, I'm aware envery setup is different
-
-#### Oracle Forms integration
-```plsql
--- Common mistake: forgetting to configure before first use
-PROCEDURE configure_telemetry IS
-BEGIN
-    PLTelemetry.set_backend_url('OTLP_BRIDGE');
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
-    PLT_OTLP_BRIDGE.set_service_info('oracle-forms', '1.0.0');
-END;
-
--- Call this in WHEN-NEW-FORM-INSTANCE or similar
-```
-
-## Requirements
-
-### Database
-- Oracle Database 12c+
-- Required privileges: `UTL_HTTP`, `CREATE TABLE`, `CREATE PROCEDURE`
-
-### Network
-- HTTP access to your observability collector (Tempo, Jaeger, etc.)
-- Proper ACL configuration for outbound connections
-
-### Oracle Forms
-- Oracle Forms 6i or higher
-- Network access from Forms client/server to database
-
-### Grants
-```sql
--- Run as DBA
-GRANT EXECUTE ON UTL_HTTP TO your_plsql_user;
-GRANT CREATE JOB TO your_plsql_user;
-
--- ACL for outbound HTTP (Oracle 11g+)
-BEGIN
-  DBMS_NETWORK_ACL_ADMIN.CREATE_ACL(
-    acl         => 'pltelemetry_acl.xml',
-    description => 'PLTelemetry HTTP access',
-    principal   => 'YOUR_PLSQL_USER',
-    is_grant    => TRUE,
-    privilege   => 'connect',
-    start_date  => NULL,
-    end_date    => NULL
-  );
-  
-  DBMS_NETWORK_ACL_ADMIN.ASSIGN_ACL(
-    acl  => 'pltelemetry_acl.xml',
-    host => 'your-tempo-host',
-    lower_port => 4318,
-    upper_port => 4318
-  );
-  
-  COMMIT;
-END;
-/
-```
-
-## Production Deployments
-
-### Multi-Environment Setup
-```sql
--- Environment-specific configuration
-DECLARE
-    l_environment VARCHAR2(10) := SYS_CONTEXT('USERENV', 'DB_NAME');
-BEGIN
-    IF l_environment LIKE '%PROD%' THEN
-        PLT_OTLP_BRIDGE.set_otlp_collector('http://prod-tempo:4318');
-        PLT_OTLP_BRIDGE.set_service_info('erp-prod', '2.1.0');
-        PLTelemetry.set_async_mode(TRUE);
-    ELSIF l_environment LIKE '%TEST%' THEN
-        PLT_OTLP_BRIDGE.set_otlp_collector('http://test-tempo:4318');
-        PLT_OTLP_BRIDGE.set_service_info('erp-test', '2.1.0');
-        PLTelemetry.set_async_mode(FALSE);
-        PLT_OTLP_BRIDGE.set_debug_mode(TRUE);
-    END IF;
-END;
-/
-```
-
-### Queue Management Job
-```sql
--- Scheduled job to process async queue
-BEGIN
-  DBMS_SCHEDULER.CREATE_JOB(
-    job_name        => 'PLT_QUEUE_PROCESSOR',
-    job_type        => 'PLSQL_BLOCK',
-    job_action      => 'BEGIN PLTelemetry.process_queue(500); END;',
-    start_date      => SYSTIMESTAMP,
-    repeat_interval => 'FREQ=MINUTELY;INTERVAL=1',
-    enabled         => TRUE,
-    comments        => 'Process PLTelemetry async queue'
-  );
-END;
-/
-```
-
-## Project Status
-
-**Production Ready:**
-- ✅ Core PLTelemetry package with distributed tracing
-- ✅ OTLP bridge for Grafana/Tempo/Jaeger integration
-- ✅ PostgreSQL bridge for custom analytics
-- ✅ Oracle Forms integration and distributed tracing
-- ✅ Async and sync processing modes
-- ✅ Comprehensive error handling and isolation
-- ✅ Multi-tenant support
-
-
-**Roadmap:**
-- 🔄 Elasticsearch bridge for log analytics
-- 📈 InfluxDB bridge for time-series metrics
-- 🧩 Dynamic sampling for high-throughput systems
-- 🛰️ gRPC and OTLP/HTTP v1 support
-- 🖥️ Full Oracle APEX and REST Data Services (ORDS) integration
-
 
 ## Contributing
 
-PLTelemetry is open source and welcomes contributions:
+PLTelemetry is open source and welcomes contributions, especially:
 
-1. **Report Issues** - Found a bug or have a feature request?
-2. **Create Bridges** - Add support for new observability backends
-3. **Create Agents** - Creating external agents to process the queue (one agent coded in golang in the making)
-3. **Improve Core** - Enhance the core PLTelemetry package
-4. **Write Examples** - Help others with real-world integration examples
-5. **Documentation** - Improve setup guides and troubleshooting
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
-
+- Additional bridges for other observability backends
+- Performance optimizations
+- Oracle APEX integration
+- Better documentation and examples
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-
-- OpenTelemetry community for the observability standards
-- Oracle community for PL/SQL best practices and Forms integration guidance
-- Grafana Labs for Tempo and excellent observability tools
-- All contributors who help make Oracle database observability better
-
 ---
 
-**PLTelemetry** - Because your Oracle stack deserves continuously evolving observability.
+**PLTelemetry** - Simple, honest observability for Oracle environments.
 
-*Distributed tracing • Metrics • Structured logging • Oracle Forms • PL/SQL • Reports*
-
-## 🧠 PLTelemetry Architecture Summary
-
-PLTelemetry is a distributed telemetry system for Oracle-based systems, with full support for legacy and modern workloads.
-
-### 🔧 Core Design Goals
-- Lightweight
-- Secure
-- Extensible
-- Easy to maintain
-- Ideal for both real usage and demos
-
-### 🧱 Core Components
-
-#### PLTelemetry (PL/SQL Core)
-- Generates spans and metrics directly from PL/SQL
-- Uses VARCHAR2/CLOB hybrid JSON builder
-- Stores telemetry in queue tables (staging layer)
-
-#### External Agent (Go)
-- Stateless binary that connects to Oracle
-- Reads telemetry queue, pushes to OTEL collector
-- Driven by Oracle-side configuration
-- Cross-platform (Windows/Linux), no dependencies
-- Secure: uses GPG-encrypted credentials via core env system
-
-#### OTEL Collector
-- Receives data and forwards to:
-  - Tempo (traces)
-  - Prometheus (metrics)
-  - Loki (future logs)
-
-#### Grafana
-- Central dashboard and alerting per tenant
-- Flexible tenant filtering and panels
-
-### 🔄 Data Flow & Failover Strategy
-
-```
-  Primary:   PL/SQL → Queue Table → Go Agent → OTEL Collector
-  Fallback:  PL/SQL → OTLP Bridge (UTL_HTTP) → OTEL Collector
-```
-
-- Binary decision logic: agent alive = use it; dead = fallback to bridge
-- All config lives in Oracle DB
-- Telemetry always persisted first → no data loss
-- No hybrid mode: clean failover behavior
-
-### 🔒 Oracle Security Model
-
-- Oracle DB does **not** access internet directly under normal flow
-- Go Agent is the only outbound component
-- Agent can be monitored using OTLP Bridge health checks
-- Credentials are encrypted and managed externally
-
-### ❤️ Designed for Enterprise Multi-Tenant Environments
-
-- Trace context includes `tenant_id` for filtering
-- Dashboards per tenant in Grafana
-- Custom alerts and routing possible using OTEL labels
-
-
-### 🔐 Example: Tenant-Aware Tracing with Context
-
-```sql
-DECLARE
-    l_trace_id VARCHAR2(32);
-    l_span_id  VARCHAR2(16);
-BEGIN
-    -- Distributed trace including tenant ID
-    l_trace_id := PLTelemetry.start_trace('invoice_generation');
-
-    -- Span with tenant-specific operation
-    l_span_id := PLTelemetry.continue_distributed_trace(
-        p_trace_id  => l_trace_id,
-        p_operation => 'generate_pdf',
-        p_tenant_id => 'tenant_42'
-    );
-
-    -- Add event
-    PLTelemetry.add_event(l_span_id, 'rendering_started');
-
-    -- Business logic...
-    generate_invoice_pdf();
-
-    -- Complete the span
-    PLTelemetry.end_span(l_span_id, 'OK');
-    PLTelemetry.end_trace(l_trace_id);
-END;
-/
-```
-
-
-### ⚙️ Example: Background Job Tracing
-
-```sql
-BEGIN
-    -- Called by DBMS_SCHEDULER or batch job
-    DECLARE
-        l_trace_id VARCHAR2(32) := PLTelemetry.start_trace('daily_cleanup');
-        l_span_id  VARCHAR2(16) := PLTelemetry.start_span('remove_stale_records');
-    BEGIN
-        DELETE FROM temp_data WHERE created_at < SYSDATE - 7;
-        PLTelemetry.log_metric('records.deleted', SQL%ROWCOUNT, 'rows');
-        PLTelemetry.end_span(l_span_id, 'OK');
-        PLTelemetry.end_trace(l_trace_id);
-    EXCEPTION
-        WHEN OTHERS THEN
-            PLTelemetry.end_span(l_span_id, 'ERROR');
-            PLTelemetry.end_trace(l_trace_id);
-    END;
-END;
-/
-```
-
-
-### ⚡ Example: Minimal Single-Span Tracing with Metric
-
-```sql
-DECLARE
-    l_span_id VARCHAR2(16);
-BEGIN
-    l_span_id := PLTelemetry.start_span('calc_discount');
-
-    -- Simulate operation
-    apply_customer_discount(p_customer_id);
-
-    -- Metric and close
-    PLTelemetry.log_metric('discounts_applied', 1, 'count');
-    PLTelemetry.end_span(l_span_id, 'OK');
-END;
-/
-```
-
+*Not trying to be everything to everyone. Just solving real problems for Oracle shops.*
