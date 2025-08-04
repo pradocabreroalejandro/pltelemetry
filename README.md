@@ -44,7 +44,7 @@ This project is provided “**as is**”, without any warranty. Use at your own 
 ## The Architecture (Simple & Honest)
 
 ```
-Oracle PL/SQL → Queue Table → WoofyMetrics Agent → OTLP Collector → Grafana/Tempo
+Oracle PL/SQL → Queue Table → WoofyMetrics Agent → OTLP Collector → Grafana/Tempo/Loki/Prometheus
      ↓                              ↓
  Fallback to UTL_HTTP      Pulse Throttling System
                                     ↓
@@ -75,7 +75,7 @@ PLTelemetry includes an intelligent **Pulse Throttling System** that automatical
 
 ### ✅ Production Ready
 - **Core PLTelemetry Package**: Full distributed tracing with spans, events, attributes
-- **OTLP Bridge**: Native Oracle 12c+ JSON integration with Tempo/Jaeger/Grafana
+- **OTLP Bridge**: Native Oracle 12c+ JSON integration with Tempo/Loki/Prometheus/Grafana
 - **WoofyMetrics Agent**: Async processing with circuit breakers, throttling, and health monitoring
 - **Pulse Throttling System**: Adaptive system protection with 5 throttling modes (PULSE1→COMA)
 - **Intelligent Failover**: Automatic agent health detection with Oracle fallback integration
@@ -115,8 +115,8 @@ BEGIN
     -- Tell PLTelemetry to use OTLP
     PLTelemetry.set_backend_url('OTLP_BRIDGE');
     
-    -- Point to your Tempo/Jaeger endpoint
-    PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
+    -- Point to your OTEL Collector/Jaeger endpoint
+    PLT_OTLP_BRIDGE.set_otlp_collector('http://otel-collector:4318');
     
     -- Identify your service
     PLT_OTLP_BRIDGE.set_service_info('oracle-app', '1.0.0');
@@ -212,7 +212,7 @@ PLTelemetry.set_async_mode(TRUE);   -- Background processing
 PLTelemetry.set_autocommit(FALSE);  -- Manual transaction control
 
 -- OTLP endpoint
-PLT_OTLP_BRIDGE.set_otlp_collector('http://tempo:4318');
+PLT_OTLP_BRIDGE.set_otlp_collector('http://otel-collector:4318');
 PLT_OTLP_BRIDGE.set_service_info('your-app', '1.0.0');
 ```
 
@@ -346,7 +346,7 @@ This ensures your Oracle database is never overwhelmed by telemetry processing.
 - Required privileges: `UTL_HTTP`, `CREATE TABLE`, `CREATE PROCEDURE`
 
 ### Network
-- HTTP access to your OTLP collector (Tempo, Jaeger, etc.)
+- HTTP access to your OTLP collector (OTEL Collector, Jaeger, etc.)
 - Proper ACL configuration for outbound connections
 
 ### Grants Setup
@@ -366,7 +366,7 @@ BEGIN
   
   DBMS_NETWORK_ACL_ADMIN.ASSIGN_ACL(
     acl => 'pltelemetry_acl.xml',
-    host => 'your-tempo-host',
+    host => 'your-collector-host',
     lower_port => 4318,
     upper_port => 4318
   );
@@ -415,7 +415,7 @@ SELECT COUNT(*) FROM plt_queue WHERE processed = 'N';
 
 ### Common Issues
 
-1. **No traces in Grafana**: Check network connectivity and Tempo configuration
+1. **No traces in Grafana**: Check network connectivity and OTEL collector configuration
 2. **Performance issues**: Enable async mode and adjust sampling rates  
 3. **System overload**: Check pulse throttling modes - agent may be in COMA mode
 4. **ACL errors**: Verify UTL_HTTP grants and network ACL setup
