@@ -78,7 +78,7 @@ CREATE INDEX idx_plt_activation_wildcards ON PLT_TELEMETRY_ACTIVATION (
 -- Sampling rate queries
 CREATE INDEX idx_plt_activation_sampling ON PLT_TELEMETRY_ACTIVATION (
     sampling_rate, enabled
-)
+);
 
 -- =============================================================================
 -- 4. AUDIT TRIGGER - CRITICAL: Always sends to Loki
