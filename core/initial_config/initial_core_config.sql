@@ -21,7 +21,7 @@ BEGIN
     
     -- Processing mode configuration
     PLTelemetry.set_async_mode(TRUE);  -- Synchronous for immediate feedback during testing
-    DBMS_OUTPUT.PUT_LINE('✓ Async mode set to: FALSE (synchronous)');
+    DBMS_OUTPUT.PUT_LINE('✓ Async mode set to: TRUE (asynchronous)');
     
     -- Auto-commit configuration
     PLTelemetry.set_autocommit(TRUE);   -- Auto-commit for better reliability
