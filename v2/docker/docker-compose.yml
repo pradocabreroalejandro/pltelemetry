@@ -1,0 +1,202 @@
+# =============================================================================
+# PLTelemetry Master Stack - The "Golden" Version
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # INFRASTRUCTURE - Oracle Database
+  # ---------------------------------------------------------------------------
+  oracle-db:
+    image: gvenzl/oracle-free:latest
+    container_name: oracle-plt
+    hostname: oracle-db
+    restart: unless-stopped
+    environment:
+      - ORACLE_PASSWORD=plt
+      - APP_USER=plt
+      - APP_USER_PASSWORD=plt
+      - ORACLE_DATABASE=FREEPDB1
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    networks:
+      - pltelemetry-network
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "plt/plt@//localhost:1521/FREEPDB1", "<<<", "SELECT 1 FROM DUAL;"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # CEREBRO - OpenTelemetry Collector
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: plt-otel-collector
+    # IMPORTANTE: Mapeamos tu fichero otel-collector-config.yaml
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP (Tu PL/SQL dispara aquí)
+      - "8888:8888" # Self metrics
+      - "8889:8889" # Prometheus Exporter
+      - "13133:13133" # Health check
+      - "55679:55679" # zPages
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TRAZAS - Tempo
+  # ---------------------------------------------------------------------------
+  tempo:
+    image: grafana/tempo:latest
+    container_name: plt-tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./configs/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # API
+      - "4317"      # gRPC interno (no hace falta exponerlo al host, pero ayuda a debug)
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+    user: "0" # Permisos root para escribir en volumen
+
+  # ---------------------------------------------------------------------------
+  # LOGS - Loki
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:latest
+    container_name: plt-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./configs/loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MÉTRICAS - Prometheus
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: plt-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # VISUALIZACIÓN - Grafana
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: plt-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      # Correo (MailHog)
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=mailhog:1025
+      - GF_SMTP_SKIP_VERIFY=true
+      - GF_SMTP_FROM_ADDRESS=pltelemetry@grafana.local
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # Si tienes carpetas de provisioning locales, descomenta esto:
+      # - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3020:3000" # Grafana en puerto 3020
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+      - mailhog
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # EXTRAS - MailHog & Servicios
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: plt-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # Tus servicios de ejemplo (mantengo uno como referencia, añade los otros si quieres)
+  batch-processor:
+     # build: .  <-- OJO: Si no vas a hacer build ahora, comenta esto y usa image si la tienes
+     # O asumo que la imagen ya existe localmente o usas contexto
+     image: node:18-alpine # Placeholder si no quieres buildear ahora
+     container_name: plt-batch-processor
+     ports:
+       - "8004:8004"
+     environment:
+       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+     networks:
+       - pltelemetry-network
+
+# =============================================================================
+# VOLUMES & NETWORKS
+# =============================================================================
+# =============================================================================
+# VOLUMES - CONECTANDO AL PASADO (MIGRACIÓN)
+# =============================================================================
+volumes:
+  # Base de Datos (Lo más importante)
+  oracle-data:
+    external: true
+    name: docker_compose_oracle-data 
+
+  # Observabilidad (Para no perder tus dashboards ni historia)
+  grafana-data:
+    external: true
+    name: docker_compose_grafana-data
+
+  prometheus-data:
+    external: true
+    name: docker_compose_prometheus-data
+
+  loki-data:
+    external: true
+    name: docker_compose_loki-data
+
+  tempo-data:
+    external: true
+    name: docker_compose_tempo-data
+
+networks:
+  pltelemetry-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
