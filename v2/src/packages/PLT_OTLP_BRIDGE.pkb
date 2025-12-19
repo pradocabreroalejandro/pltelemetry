@@ -20,15 +20,19 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         IF g_debug THEN DBMS_OUTPUT.PUT_LINE('[BRIDGE] ' || p_msg); END IF;
     END;
 
+    -- Generador de IDs Hexadecimales CORREGIDO
     FUNCTION random_hex(p_length NUMBER) RETURN VARCHAR2 IS
         l_hex VARCHAR2(100);
     BEGIN
-        SELECT LISTAGG(TO_CHAR(ROUND(DBMS_RANDOM.VALUE(0, 15)), 'X'), '') 
+        -- Usamos 'FMX' para eliminar espacios en blanco (FM) y usar Hex (X)
+        SELECT LISTAGG(TO_CHAR(ROUND(DBMS_RANDOM.VALUE(0, 15)), 'FMX'), '') 
                WITHIN GROUP (ORDER BY level)
         INTO l_hex
         FROM dual 
         CONNECT BY level <= p_length;
-        RETURN TRIM(l_hex);
+        
+        -- Nos aseguramos de devolver exactamente lo que piden, aunque el LISTAGG suele portarse bien
+        RETURN SUBSTR(l_hex, 1, p_length);
     END;
 
     FUNCTION get_timestamp_nano(p_ts TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP) RETURN VARCHAR2 IS

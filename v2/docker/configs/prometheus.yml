@@ -40,10 +40,3 @@ scrape_configs:
     static_configs:
       - targets: ['loki:3100']
     metrics_path: /metrics
-
-  # PLT Agent metrics
-  - job_name: 'plt-agent'
-    static_configs:
-      - targets: ['172.21.0.1:8080']
-    metrics_path: /metrics
-    scrape_interval: 10s

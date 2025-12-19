@@ -62,9 +62,10 @@ exporters:
 
   # Debug muy limitado
   debug:
-    verbosity: basic
-    sampling_initial: 1
-    sampling_thereafter: 1000   # Muy poco verbose
+    verbosity: detailed
+    #verbosity: basic
+    #sampling_initial: 1
+    #sampling_thereafter: 1000   # Muy poco verbose
 
 # 🆕 EXTENSIONES - AQUÍ ESTÁ LA MAGIA
 extensions:
@@ -80,7 +81,7 @@ service:
   extensions: [health_check, pprof, zpages]
   telemetry:
     logs:
-      level: "warn"
+      level: "info" # Cambia 'warn' a 'info' para ver al menos que arranca bien
     metrics:
       level: "basic"    
 
@@ -88,14 +89,14 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters: [otlp/tempo]
+      exporters: [otlp/tempo, debug] # <--- AÑADIDO
 
     metrics:
       receivers: [otlp, prometheus]
       processors: [memory_limiter, resource, batch]
-      exporters: [prometheus]
+      exporters: [prometheus, debug]  # <--- ¡AQUÍ ESTÁ LA CLAVE!
 
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [loki]
+      exporters: [loki, debug]        # <--- AÑADIDO
