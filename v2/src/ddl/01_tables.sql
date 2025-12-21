@@ -85,3 +85,14 @@ CREATE TABLE plt_telemetry_errors (
     span_id       VARCHAR2(16),  -- <--- Añado Span ID también, muy útil
     tenant_id     VARCHAR2(100)  -- <--- AÑADIDO (Vital para saber a quién culpar)
 );
+
+CREATE TABLE plt_activation_rules (
+    rule_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    object_pattern  VARCHAR2(100) NOT NULL, -- Ej: 'PAQUETE_VENTAS.%' o '*'
+    is_enabled      VARCHAR2(1) DEFAULT 'Y' CHECK (is_enabled IN ('Y', 'N')),
+    sample_rate     NUMBER DEFAULT 1.0 CHECK (sample_rate BETWEEN 0 AND 1), -- 1.0 = 100%, 0.1 = 10%
+    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+-- Índices para búsqueda rápida
+CREATE UNIQUE INDEX idx_plt_rules_pattern ON plt_activation_rules(object_pattern);

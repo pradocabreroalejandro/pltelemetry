@@ -26,3 +26,10 @@ VALUES ('COMA',   0.00, 0.00, 60.00, 0.00, 'N', 'System Overload - Hibernation')
 
 COMMIT;
 PROMPT Default configuration loaded.
+
+-- DATOS INICIALES (Ejemplos)
+-- 1. Por defecto, TODO apagado (Seguridad por diseño)
+INSERT INTO plt_activation_rules (object_pattern, is_enabled, sample_rate) 
+VALUES ('*', 'N', 0);
+
+COMMIT;

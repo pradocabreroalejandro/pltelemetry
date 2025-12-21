@@ -336,8 +336,8 @@ AS
         
         -- Probabilistic sampling
         l_random_value := DBMS_RANDOM.VALUE(0, 1);
-
-        RETURN l_random_value <= l_sampling_rate;
+        RETURN TRUE;
+        -- RETURN l_random_value <= l_sampling_rate;
         
     EXCEPTION
         WHEN OTHERS THEN
