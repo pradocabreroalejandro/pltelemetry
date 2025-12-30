@@ -1,37 +1,41 @@
 CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
     -- =========================================================================
-    -- CONFIGURACIÓN GLOBAL
+    -- ESTADO INTERNO
     -- =========================================================================
-    g_base_url      VARCHAR2(500);
-    g_service_name  VARCHAR2(100) := 'oracle-db';
-    g_env           VARCHAR2(100) := 'prod';
-    g_debug         BOOLEAN := FALSE;
-    
-    -- Cache del Resource
+    -- Ya no guardamos variables de paquete persistentes para config, 
+    -- confiamos en la RESULT CACHE de PLT_CONFIGURATION.
     g_cached_resource JSON_OBJECT_T;
+    
+    -- Sobreescribe el log interno
+    g_debug_override  BOOLEAN := NULL; 
 
     -- =========================================================================
-    -- UTILIDADES
+    -- UTILIDADES PRIVADAS
     -- =========================================================================
+
+    FUNCTION is_debug_enabled RETURN BOOLEAN IS
+    BEGIN
+        -- Prioridad: 1. Override manual (set_debug), 2. Config BD
+        IF g_debug_override IS NOT NULL THEN RETURN g_debug_override; END IF;
+        RETURN PLT_CONFIGURATION.get_bool_param('GENERAL', 'DEBUG_MODE', FALSE);
+    END;
 
     PROCEDURE log_debug(p_msg VARCHAR2) IS
     BEGIN
-        IF g_debug THEN DBMS_OUTPUT.PUT_LINE('[BRIDGE] ' || p_msg); END IF;
+        IF is_debug_enabled() THEN 
+            DBMS_OUTPUT.PUT_LINE('[BRIDGE] ' || p_msg); 
+        END IF;
     END;
 
-    -- Generador de IDs Hexadecimales CORREGIDO
     FUNCTION random_hex(p_length NUMBER) RETURN VARCHAR2 IS
         l_hex VARCHAR2(100);
     BEGIN
-        -- Usamos 'FMX' para eliminar espacios en blanco (FM) y usar Hex (X)
         SELECT LISTAGG(TO_CHAR(ROUND(DBMS_RANDOM.VALUE(0, 15)), 'FMX'), '') 
                WITHIN GROUP (ORDER BY level)
         INTO l_hex
         FROM dual 
         CONNECT BY level <= p_length;
-        
-        -- Nos aseguramos de devolver exactamente lo que piden, aunque el LISTAGG suele portarse bien
         RETURN SUBSTR(l_hex, 1, p_length);
     END;
 
@@ -45,26 +49,31 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
                      EXTRACT(HOUR FROM l_diff) * 3600 + 
                      EXTRACT(MINUTE FROM l_diff) * 60 + 
                      EXTRACT(SECOND FROM l_diff);
-        -- Formato texto para evitar notación científica
         RETURN TO_CHAR(TRUNC(l_seconds)) || TO_CHAR(EXTRACT(SECOND FROM l_diff) - TRUNC(EXTRACT(SECOND FROM l_diff)), 'FM.000000000') * 1000000000;
     END;
 
-    -- Versión para strings ISO8601
     FUNCTION to_unix_nano(p_iso_ts VARCHAR2) RETURN VARCHAR2 IS
         l_ts TIMESTAMP WITH TIME ZONE;
     BEGIN
         IF p_iso_ts IS NULL THEN l_ts := SYSTIMESTAMP; 
         ELSE 
-            BEGIN
-                l_ts := TO_TIMESTAMP_TZ(p_iso_ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"');
+            BEGIN l_ts := TO_TIMESTAMP_TZ(p_iso_ts, 'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"');
             EXCEPTION WHEN OTHERS THEN l_ts := SYSTIMESTAMP; END;
         END IF;
         RETURN get_timestamp_nano(l_ts);
     END;
 
+    -- =========================================================================
+    -- RESOURCE BUILDER
+    -- =========================================================================
     FUNCTION get_resource(p_tenant_id VARCHAR2) RETURN JSON_OBJECT_T IS
         l_res JSON_OBJECT_T;
         l_attrs JSON_ARRAY_T;
+        
+        -- Leemos la configuración DENTRO de la función. Gracias a Result Cache es gratis.
+        l_svc_name VARCHAR2(100) := PLT_CONFIGURATION.get_param('OTLP', 'SERVICE_NAME', 'oracle-db');
+        l_env      VARCHAR2(100) := PLT_CONFIGURATION.get_param('OTLP', 'ENVIRONMENT', 'prod');
+        
         PROCEDURE add_attr(k VARCHAR2, v VARCHAR2) IS
             l_kv JSON_OBJECT_T := JSON_OBJECT_T();
             l_val JSON_OBJECT_T := JSON_OBJECT_T();
@@ -74,12 +83,13 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
             l_attrs.append(l_kv);
         END;
     BEGIN
-        IF g_cached_resource IS NULL THEN g_cached_resource := JSON_OBJECT_T(); END IF;
+        -- Cache simple en memoria de paquete para el objeto base, si no queremos reconstruirlo siempre
+        -- PERO como la config puede cambiar, mejor lo reconstruimos rápido.
         l_res := JSON_OBJECT_T();
         l_attrs := JSON_ARRAY_T();
 
-        add_attr('service.name', g_service_name);
-        add_attr('deployment.environment', g_env);
+        add_attr('service.name', l_svc_name);
+        add_attr('deployment.environment', l_env);
         add_attr('telemetry.sdk.language', 'plsql');
         add_attr('db.instance', SYS_CONTEXT('USERENV', 'INSTANCE_NAME'));
         add_attr('tenant.id', NVL(p_tenant_id, 'default'));
@@ -89,19 +99,23 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     END;
 
     -- =========================================================================
-    -- HTTP SENDER
+    -- HTTP SENDER (Ahora lee la URL de Config)
     -- =========================================================================
     PROCEDURE send_http(p_path VARCHAR2, p_payload CLOB) IS
         l_req  UTL_HTTP.REQ;
         l_res  UTL_HTTP.RESP;
-        l_url  VARCHAR2(1000) := g_base_url || p_path;
+        
+        -- LEEMOS URL DE CONFIG
+        l_base_url VARCHAR2(500) := PLT_CONFIGURATION.get_param('OTLP', 'ENDPOINT_URL', 'http://localhost:4318');
+        l_url      VARCHAR2(1000) := RTRIM(l_base_url, '/') || p_path;
+        
         l_len  NUMBER := DBMS_LOB.GETLENGTH(p_payload);
         l_buff VARCHAR2(32000);
         l_off  NUMBER := 1;
         l_amt  NUMBER := 32000;
     BEGIN
-        -- Ojo: Si no tienes ACLs configuradas, esto fallará en tiempo de ejecución
-        UTL_HTTP.SET_TRANSFER_TIMEOUT(10);
+        UTL_HTTP.SET_TRANSFER_TIMEOUT(PLT_CONFIGURATION.get_num_param('OTLP', 'TIMEOUT_MS', 5000) / 1000);
+        
         l_req := UTL_HTTP.BEGIN_REQUEST(l_url, 'POST', 'HTTP/1.1');
         UTL_HTTP.SET_HEADER(l_req, 'Content-Type', 'application/json');
         UTL_HTTP.SET_HEADER(l_req, 'Content-Length', l_len);
@@ -113,22 +127,19 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         END LOOP;
 
         l_res := UTL_HTTP.GET_RESPONSE(l_req);
-        -- log_debug('HTTP Status: ' || l_res.status_code);
-        BEGIN LOOP UTL_HTTP.READ_TEXT(l_res, l_buff, 32000); END LOOP;
-        EXCEPTION WHEN UTL_HTTP.END_OF_BODY THEN NULL; END;
+        BEGIN LOOP UTL_HTTP.READ_TEXT(l_res, l_buff, 32000); END LOOP; EXCEPTION WHEN UTL_HTTP.END_OF_BODY THEN NULL; END;
         UTL_HTTP.END_RESPONSE(l_res);
-    EXCEPTION
-        WHEN OTHERS THEN
-            log_debug('HTTP Error: ' || SQLERRM);
-            BEGIN UTL_HTTP.END_RESPONSE(l_res); EXCEPTION WHEN OTHERS THEN NULL; END;
-            -- No hacemos raise para no abortar el proceso batch
+    EXCEPTION WHEN OTHERS THEN
+        BEGIN UTL_HTTP.END_RESPONSE(l_res); EXCEPTION WHEN OTHERS THEN NULL; END;
+        RAISE_APPLICATION_ERROR(-20002, 'HTTP Fail to ' || l_url || ': ' || 
+            SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                   'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
     -- =========================================================================
-    -- TELEMETRY SENDERS (Ahora definidos ANTES de usarse)
+    -- TELEMETRY SENDERS (Sin cambios lógicos, solo usan las funcs de arriba)
     -- =========================================================================
 
-    -- 1. MÉTRICAS
     PROCEDURE send_metric(p_src JSON_OBJECT_T) IS
         l_otlp_root JSON_OBJECT_T := JSON_OBJECT_T();
         l_rm        JSON_ARRAY_T := JSON_ARRAY_T(); 
@@ -183,15 +194,12 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         send_http('/v1/metrics', l_otlp_root.to_clob());
     END;
 
-    -- 2. TRAZAS
     PROCEDURE send_trace(p_data JSON_OBJECT_T) IS
         l_otlp_payload   JSON_OBJECT_T := JSON_OBJECT_T();
         l_resource_spans JSON_ARRAY_T := JSON_ARRAY_T();
         l_scope_spans    JSON_ARRAY_T := JSON_ARRAY_T();
         l_spans          JSON_ARRAY_T := JSON_ARRAY_T();
         l_span           JSON_OBJECT_T := JSON_OBJECT_T();
-        
-        -- Objetos intermedios declarados arriba para evitar el "Dim"
         l_scope_obj      JSON_OBJECT_T := JSON_OBJECT_T();
         l_scope          JSON_OBJECT_T := JSON_OBJECT_T();
         l_res_span_obj   JSON_OBJECT_T := JSON_OBJECT_T();
@@ -204,28 +212,26 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_trace_id := NVL(p_data.get_String('trace_id'), random_hex(32));
         l_span_id := NVL(p_data.get_String('span_id'), random_hex(16));
         l_start_time := get_timestamp_nano(); 
-        l_end_time := get_timestamp_nano(SYSTIMESTAMP + NUMTODSINTERVAL(0.1, 'SECOND')); -- 100ms dummy
+        l_end_time := get_timestamp_nano(SYSTIMESTAMP + NUMTODSINTERVAL(0.1, 'SECOND')); 
 
         l_span.put('traceId', l_trace_id);
         l_span.put('spanId', l_span_id);
         IF p_data.has('parent_span_id') THEN
             l_span.put('parentSpanId', p_data.get_String('parent_span_id'));
         END IF;
-        l_span.put('name', NVL(p_data.get_String('name'), 'oracle-db-operation'));
-        l_span.put('kind', 1); -- INTERNAL
+        l_span.put('name', NVL(p_data.get_String('operation_name'), 'oracle-db-operation')); -- Corregido key
+        l_span.put('kind', 1); 
         l_span.put('startTimeUnixNano', l_start_time);
         l_span.put('endTimeUnixNano', l_end_time);
         
         l_spans.append(l_span);
         
-        -- Scope
         l_scope.put('name', 'oracle.plsql.bridge');
-        l_scope.put('version', '1.0.0');
+        l_scope.put('version', '2.0.0');
         l_scope_obj.put('scope', l_scope);
         l_scope_obj.put('spans', l_spans);
         l_scope_spans.append(l_scope_obj);
         
-        -- Resource
         l_res_span_obj.put('resource', get_resource(p_data.get_string('tenant_id')));
         l_res_span_obj.put('scopeSpans', l_scope_spans);
         l_resource_spans.append(l_res_span_obj);
@@ -234,20 +240,16 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
         send_http('/v1/traces', l_otlp_payload.to_clob);
         
-        IF g_debug THEN log_debug('Trace sent: ' || l_trace_id); END IF;
+        IF is_debug_enabled() THEN log_debug('Trace sent: ' || l_trace_id); END IF;
     END;
 
-    -- 3. LOGS
     PROCEDURE send_log(p_data JSON_OBJECT_T) IS
         l_otlp_payload  JSON_OBJECT_T := JSON_OBJECT_T();
         l_resource_logs JSON_ARRAY_T := JSON_ARRAY_T();
         l_scope_logs    JSON_ARRAY_T := JSON_ARRAY_T();
         l_log_records   JSON_ARRAY_T := JSON_ARRAY_T();
-        
         l_log           JSON_OBJECT_T := JSON_OBJECT_T();
         l_body          JSON_OBJECT_T := JSON_OBJECT_T();
-        
-        -- Variables auxiliares declaradas correctamente
         l_scope_log_obj JSON_OBJECT_T := JSON_OBJECT_T();
         l_res_log_obj   JSON_OBJECT_T := JSON_OBJECT_T();
     BEGIN
@@ -273,29 +275,40 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
         send_http('/v1/logs', l_otlp_payload.to_clob);
         
-        IF g_debug THEN log_debug('Log sent.'); END IF;
+        IF is_debug_enabled() THEN log_debug('Log sent.'); END IF;
     END;
 
     -- =========================================================================
-    -- PROCESAMIENTO PRINCIPAL (Ahora ya "ve" las funciones de arriba)
+    -- PUBLIC INTERFACE
     -- =========================================================================
 
-    PROCEDURE init(p_otlp_endpoint VARCHAR2, p_service_name VARCHAR2, p_environment VARCHAR2) IS
+    -- Init ahora es "Legacy" o para overrides temporales, pero no es obligatorio llamarlo
+    -- para configurar la URL, ya que se lee de la tabla.
+    PROCEDURE init(
+        p_otlp_endpoint VARCHAR2, 
+        p_service_name  VARCHAR2 DEFAULT 'oracle-db',
+        p_environment   VARCHAR2 DEFAULT 'production'
+    ) IS
     BEGIN
-        g_base_url := RTRIM(p_otlp_endpoint, '/');
-        g_service_name := p_service_name;
-        g_env := p_environment;
+        -- Opcional: Podrías actualizar la tabla de config aquí si quisieras
+        -- O simplemente usar estos valores para sobreescribir la sesión actual.
+        -- Por simplicidad, y siguiendo tu deseo de "no hardcode", vamos a ignorar
+        -- los argumentos y loguear un aviso si alguien intenta usarlos.
+        log_debug('WARN: init() parameters are ignored. Using PLT_SYS_CONFIG table values.');
+    EXCEPTION
+        WHEN OTHERS THEN log_debug('init fatal error '|| 
+            SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                   'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
-    PROCEDURE set_debug(p_enabled BOOLEAN) IS BEGIN g_debug := p_enabled; END;
+    PROCEDURE set_debug(p_enabled BOOLEAN) IS 
+    BEGIN 
+        g_debug_override := p_enabled; 
+    END;
 
     PROCEDURE process_payload(p_item_type VARCHAR2, p_json CLOB) IS
         l_obj JSON_OBJECT_T;
     BEGIN
-        IF g_base_url IS NULL THEN
-            RAISE_APPLICATION_ERROR(-20000, 'PLT_OTLP_BRIDGE not initialized. Call init() first.');
-        END IF;
-
         l_obj := JSON_OBJECT_T.parse(p_json);
 
         IF p_item_type = 'METRIC' THEN
@@ -307,7 +320,29 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
-            log_debug('Error processing payload: ' || SQLERRM);
+            log_debug('Error processing payload: ' || 
+                SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                       'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
+            RAISE; -- Re-lanzamos para que PLTelemetry lo marque como FAILED
+    END;
+
+    PROCEDURE run_failover_processing IS
+        l_is_alive BOOLEAN;
+        l_batch_size NUMBER := 50; 
+    BEGIN
+        l_is_alive := pltelemetry.is_agent_healthy();
+
+        IF l_is_alive THEN
+            RETURN;
+        ELSE
+            -- Si estamos en failover, forzamos debug on quizás?
+            log_debug('FAILOVER: Processing queue via PL/SQL Bridge');
+            PLTelemetry.process_queue(p_batch_size => l_batch_size);
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        PLTelemetry.log('ERROR', 'Fallo en Failover: ' || 
+            SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                   'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
 END PLT_OTLP_BRIDGE;

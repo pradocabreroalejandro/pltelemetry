@@ -28,6 +28,11 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
     -- PRIVATE HELPERS
     -- =========================================================================
 
+    PROCEDURE log_debug(p_msg VARCHAR2) IS
+    BEGIN
+        IF g_debug THEN DBMS_OUTPUT.PUT_LINE('[BRIDGE] ' || p_msg); END IF;
+    END;
+
     FUNCTION generate_hex_id(p_length NUMBER) RETURN VARCHAR2 IS
         l_res     VARCHAR2(100) := '';
         l_chars   CONSTANT VARCHAR2(16) := '0123456789abcdef';
@@ -374,14 +379,16 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             WHERE status = 'NEW'
             ORDER BY id ASC
             FETCH FIRST p_batch_size ROWS ONLY;
-            
-        l_endpoint VARCHAR2(100) := 'http://otel-collector:4318';
+        
         l_err_msg  VARCHAR2(4000); -- Variable auxiliar para el error
     BEGIN
-        PLT_OTLP_BRIDGE.init(l_endpoint, 'oracle-db-prod', 'prod');
-
+        PLT_OTLP_BRIDGE.init(NULL, NULL, NULL); 
+        log_debug('process_queue() init executed');
         FOR r IN c_pending LOOP
             BEGIN
+
+                log_debug('process_queue() processing row id'||r.id||' type '||r.item_type);
+
                 PLT_OTLP_BRIDGE.process_payload(r.item_type, r.payload);
 
                 UPDATE plt_queue 
@@ -409,6 +416,43 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         ROLLBACK; 
         log_internal_error('Process queue fatal error');
     END process_queue;
+
+    FUNCTION is_agent_healthy RETURN BOOLEAN IS
+        l_mode      VARCHAR2(20);
+        l_last_beat TIMESTAMP WITH TIME ZONE;
+        l_seconds   NUMBER;
+        l_threshold CONSTANT NUMBER := 45; -- Sincronizado con tu monitor
+    BEGIN
+        BEGIN
+            SELECT pulse_mode, last_heartbeat 
+              INTO l_mode, l_last_beat
+              FROM plt_agent_registry
+             WHERE agent_id = 'PRIMARY_AGENT' 
+             FETCH FIRST 1 ROWS ONLY;
+             
+            -- Cálculo de diferencia en segundos (robusto)
+            l_seconds := EXTRACT(DAY FROM (SYSTIMESTAMP - l_last_beat)) * 86400 +
+                         EXTRACT(HOUR FROM (SYSTIMESTAMP - l_last_beat)) * 3600 +
+                         EXTRACT(MINUTE FROM (SYSTIMESTAMP - l_last_beat)) * 60 +
+                         EXTRACT(SECOND FROM (SYSTIMESTAMP - l_last_beat));
+                       
+            IF l_seconds > l_threshold THEN
+                -- Está muerto, Jim.
+                RETURN FALSE; 
+            END IF;
+
+            IF l_mode = 'COMA' THEN
+                RETURN FALSE;
+            END IF;
+            
+            RETURN TRUE;
+            
+        EXCEPTION WHEN NO_DATA_FOUND THEN
+            -- Si nunca ha habido agente, asumimos que estamos en modo 'SOLO PLSQL' o arranque
+            RETURN FALSE; -- Cambiado a FALSE por seguridad: si no hay agente, que procese el PLSQL.
+        END;
+    END;
+
 
 END PLTelemetry;
 /

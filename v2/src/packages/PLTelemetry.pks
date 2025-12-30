@@ -114,5 +114,9 @@ create or replace package pltelemetry authid definer as
 
    PROCEDURE w3c_inject_context(p_traceparent VARCHAR2);
 
+   FUNCTION is_agent_healthy RETURN BOOLEAN;
+
+   g_debug         BOOLEAN := FALSE;
+
 end pltelemetry;
 /

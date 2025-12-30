@@ -96,3 +96,129 @@ CREATE TABLE plt_activation_rules (
 
 -- Índices para búsqueda rápida
 CREATE UNIQUE INDEX idx_plt_rules_pattern ON plt_activation_rules(object_pattern);
+
+ALTER TABLE plt_queue ADD (process_attempts NUMBER DEFAULT 0 NOT NULL);
+
+-- Objeto que representa una sola medición
+CREATE OR REPLACE TYPE t_plt_metric_row AS OBJECT (
+    metric_name   VARCHAR2(100),  -- Ej: 'oracle_cpu_usage'
+    metric_value  NUMBER,         -- Ej: 45.2
+    metric_type   VARCHAR2(20),   -- Ej: 'GAUGE' o 'COUNTER'
+    tags_json     VARCHAR2(4000)  -- Ej: '{"tablespace": "USERS"}'
+);
+/
+
+-- Colección para la función Pipelined
+CREATE OR REPLACE TYPE t_plt_metric_tab AS TABLE OF t_plt_metric_row;
+/
+
+
+CREATE TABLE plt_metric_collectors (
+    collector_code      VARCHAR2(50) PRIMARY KEY,
+    reader_package      VARCHAR2(50) DEFAULT 'PLT_DB_METRIC_READER', -- Por si tienes varios paquetes
+    reader_function     VARCHAR2(100),            -- Ej: 'get_system_metrics'
+    interval_seconds    NUMBER DEFAULT 60,
+    is_enabled          NUMBER DEFAULT 1,
+    last_run            TIMESTAMP
+);
+
+-- Datos semilla
+-- 1. Métricas de Sistema (CPU, Transacciones, AAS) - Frecuencia Alta (15s)
+INSERT INTO plt_metric_collectors 
+(collector_code, reader_package, reader_function, interval_seconds, is_enabled)
+VALUES 
+('SYSTEM', 'PLT_DB_METRIC_READER', 'get_system_metrics', 15, 1);
+
+-- 2. Métricas de Sesiones (Activas, Bloqueos, Procesos) - Frecuencia Alta (15s)
+INSERT INTO plt_metric_collectors 
+(collector_code, reader_package, reader_function, interval_seconds, is_enabled)
+VALUES 
+('SESSIONS', 'PLT_DB_METRIC_READER', 'get_session_metrics', 15, 1);
+
+-- 3. Métricas de Almacenamiento (Tablespaces) - Frecuencia Baja (60s)
+-- Ojo: Esta devuelve MUCHAS filas (una por tablespace)
+INSERT INTO plt_metric_collectors 
+(collector_code, reader_package, reader_function, interval_seconds, is_enabled)
+VALUES 
+('STORAGE', 'PLT_DB_METRIC_READER', 'get_storage_metrics', 60, 1);
+
+COMMIT;
+
+-- 1. Tabla de Inquilinos (Tenants)
+CREATE TABLE plt_tenants (
+    tenant_id       VARCHAR2(50) PRIMARY KEY,
+    description     VARCHAR2(100),
+    is_enabled      NUMBER DEFAULT 1,
+    created_at      TIMESTAMP DEFAULT SYSTIMESTAMP
+);
+
+-- Insertamos el tenant por defecto y un par de "falsos clientes" para probar
+INSERT INTO plt_tenants (tenant_id, description) VALUES ('default', 'Infraestructura Global');
+INSERT INTO plt_tenants (tenant_id, description) VALUES ('CLIENTE_A', 'Empresa ACME Corp');
+INSERT INTO plt_tenants (tenant_id, description) VALUES ('CLIENTE_B', 'Wayne Enterprises');
+COMMIT;
+
+-- 2. Modificar la tabla de Colectores para añadir el SCOPE
+-- SCOPE puede ser: 'GLOBAL' (1 ejecución) o 'PER_TENANT' (N ejecuciones)
+ALTER TABLE plt_metric_collectors ADD execution_scope VARCHAR2(20) DEFAULT 'GLOBAL';
+
+-- Actualizamos: Por defecto System y Storage son Globales.
+-- Pero vamos a marcar 'SESSIONS' como PER_TENANT para simular que iteramos por clientes.
+UPDATE plt_metric_collectors SET execution_scope = 'GLOBAL'; 
+UPDATE plt_metric_collectors SET execution_scope = 'PER_TENANT' WHERE collector_code = 'SESSIONS';
+COMMIT;
+
+ALTER TABLE plt_agent_registry ADD (
+    pulse_mode   VARCHAR2(20) DEFAULT 'PULSE1', -- PULSE1, PULSE2, COMA
+    system_heat  NUMBER       DEFAULT 0         -- 0.0 a 1.0
+);
+
+-- =============================================================================
+-- TABLA DE CONFIGURACIÓN CENTRALIZADA (PLT_SYS_CONFIG)
+-- =============================================================================
+-- Adiós a los hardcodes. Aquí vive la verdad del sistema.
+
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE plt_sys_config PURGE';
+EXCEPTION WHEN OTHERS THEN NULL; END;
+/
+
+CREATE TABLE plt_sys_config (
+    config_group    VARCHAR2(50)  NOT NULL, -- Ej: 'OTLP', 'GENERAL', 'AGENT'
+    config_key      VARCHAR2(100) NOT NULL, -- Ej: 'ENDPOINT_URL', 'SERVICE_NAME'
+    config_value    VARCHAR2(4000),         -- El valor real
+    description     VARCHAR2(255),          -- Para qué sirve esto
+    is_encrypted    VARCHAR2(1) DEFAULT 'N' CHECK (is_encrypted IN ('Y', 'N')),
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    updated_by      VARCHAR2(100) DEFAULT USER,
+    CONSTRAINT pk_plt_sys_config PRIMARY KEY (config_group, config_key)
+);
+
+COMMENT ON TABLE plt_sys_config IS 'Configuración centralizada para el sistema de Observabilidad PL/SQL';
+
+-- =============================================================================
+-- DATOS INICIALES (DEFAULTS)
+-- =============================================================================
+
+-- Grupo: OTLP (Configuración del Bridge)
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('OTLP', 'ENDPOINT_URL', 'http://otel-collector:4318', 'URL base del colector OpenTelemetry');
+
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('OTLP', 'SERVICE_NAME', 'oracle-db-prod', 'Nombre del servicio reportado en las trazas');
+
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('OTLP', 'ENVIRONMENT', 'production', 'Entorno de despliegue (prod, dev, stg)');
+
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('OTLP', 'TIMEOUT_MS', '5000', 'Timeout en milisegundos para llamadas HTTP');
+
+-- Grupo: GENERAL
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('GENERAL', 'TENANT_ID_DEFAULT', 'default', 'Tenant ID por defecto si no se especifica');
+
+INSERT INTO plt_sys_config (config_group, config_key, config_value, description)
+VALUES ('GENERAL', 'DEBUG_MODE', 'FALSE', 'Activa logs de depuración internos (TRUE/FALSE)');
+
+COMMIT;
+/

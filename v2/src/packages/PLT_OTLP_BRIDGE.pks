@@ -17,5 +17,10 @@ CREATE OR REPLACE PACKAGE PLT_OTLP_BRIDGE AS
     -- El cerebro: Recibe el JSON crudo de la cola y lo manda a donde toca
     PROCEDURE process_payload(p_item_type VARCHAR2, p_json CLOB);
 
+    PROCEDURE run_failover_processing;
+
+    g_debug         BOOLEAN := FALSE;
+
+
 END PLT_OTLP_BRIDGE;
 /

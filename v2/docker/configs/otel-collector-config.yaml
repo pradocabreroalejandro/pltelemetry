@@ -9,6 +9,15 @@ receivers:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
 
+  prometheus/woofy:
+    config:
+      scrape_configs:
+        - job_name: 'woofy-agent-self-metrics'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['host.docker.internal:8080'] # Si corres Woofy fuera de docker
+            # - targets: ['woofy-agent:8080']        # Si Woofy corre en contenedor
+
   prometheus:
     config:
       scrape_configs:
@@ -57,7 +66,7 @@ exporters:
     send_timestamps: true
     metric_expiration: 60m      # 1 hora - balance memoria/utilidad
     resource_to_telemetry_conversion:
-      enabled: false
+      enabled: true
     enable_open_metrics: true
 
   # Debug muy limitado
@@ -92,7 +101,7 @@ service:
       exporters: [otlp/tempo, debug] # <--- AÑADIDO
 
     metrics:
-      receivers: [otlp, prometheus]
+      receivers: [otlp, prometheus, prometheus/woofy]
       processors: [memory_limiter, resource, batch]
       exporters: [prometheus, debug]  # <--- ¡AQUÍ ESTÁ LA CLAVE!
 
