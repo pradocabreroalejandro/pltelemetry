@@ -9,17 +9,11 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
     ----------------------------------------------------------------------------
     -- 1. SYSTEM METRICS
     ----------------------------------------------------------------------------
-    ----------------------------------------------------------------------------
-    -- 1. SYSTEM METRICS (Versión Optimizada Bulk)
-    ----------------------------------------------------------------------------
-    ----------------------------------------------------------------------------
-    -- 1. SYSTEM METRICS (Versión V$SYSSTAT + V$OSSTAT)
-    ----------------------------------------------------------------------------
     FUNCTION get_system_metrics RETURN t_plt_metric_tab PIPELINED IS
         l_row t_plt_metric_row;
     BEGIN
         -- ---------------------------------------------------------------------
-        -- A. MÉTRICAS DE CPU Y HOST (Desde V$OSSTAT - Suele estar disponible)
+        -- A. MÉTRICAS DE CPU Y HOST (Desde V$OSSTAT)
         -- ---------------------------------------------------------------------
         FOR r IN (
             SELECT stat_name, value 
@@ -31,11 +25,10 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             ELSIF r.stat_name = 'NUM_CPUS' THEN
                  PIPE ROW(t_plt_metric_row('oracle_os_num_cpus', r.value, 'GAUGE', NULL));
             END IF;
-            -- BUSY_TIME y IDLE_TIME son contadores en centisegundos, útiles para calcular CPU % exacto fuera
         END LOOP;
 
         -- ---------------------------------------------------------------------
-        -- B. CONTADORES REALES (V$SYSSTAT) - La fuente inagotable
+        -- B. CONTADORES REALES (V$SYSSTAT)
         -- ---------------------------------------------------------------------
         FOR r IN (
             SELECT name, value 
@@ -68,13 +61,12 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'bytes sent via SQL*Net to client',
                 'bytes received via SQL*Net from client',
                 
-                -- Time (Microseconds) - Vital para DB Time
+                -- Time
                 'DB time',
                 'CPU used by this session'
             )
         ) LOOP
-            -- Mapeo a nombres estandarizados (Snake Case)
-            -- Enviamos como COUNTER (acumulativo)
+            -- Mapeo a nombres estandarizados (Snake Case) y limpieza de paréntesis
             PIPE ROW(t_plt_metric_row(
                 'oracle_' || REPLACE(REPLACE(REPLACE(LOWER(r.name), ' ', '_'), '*', ''), '(', ''),
                 r.value, 
@@ -86,7 +78,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         -- ---------------------------------------------------------------------
         -- C. MÉTRICAS DE ESTADO (GAUGES Calculados al momento)
         -- ---------------------------------------------------------------------
-        -- Sessions Current (Esto no es un contador, es un estado actual)
+        -- Sessions Current
         FOR r IN (SELECT COUNT(*) cnt FROM v$session) LOOP
             PIPE ROW(t_plt_metric_row('oracle_session_count_current', r.cnt, 'GAUGE', NULL));
         END LOOP;
@@ -141,7 +133,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tablespace_usage_percent', 
                 ROUND(r.used_percent, 2), 
                 'GAUGE', 
-                tag('tablespace', r.tablespace_name) -- Tag dinámico
+                tag('tablespace', r.tablespace_name)
             ));
         END LOOP;
         

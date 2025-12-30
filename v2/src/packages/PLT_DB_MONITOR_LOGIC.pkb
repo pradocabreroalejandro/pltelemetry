@@ -14,9 +14,6 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         FOR i IN 1 .. p_dataset.COUNT LOOP
             l_attrs := CAST(NULL AS PLTelemetry.t_attributes);
             
-            -- NOTA: Ya no inyectamos 'tenant_id' aquí manualmente.
-            -- PLTelemetry.log_metric lo cogerá de su g_tenant_id interno.
-            
             -- Solo procesamos tags extra si la métrica los trae (ej: tablespace)
             IF p_dataset(i).tags_json IS NOT NULL THEN
                 BEGIN
@@ -51,18 +48,19 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         l_rows   t_plt_metric_tab;
         l_sql    VARCHAR2(1000);
     BEGIN
-        -- No necesitamos pasar el tenant aquí, porque ya se seteó antes de llamar a esta func.
-        
         l_sql := 'SELECT VALUE(t) FROM TABLE(' || 
                  DBMS_ASSERT.SIMPLE_SQL_NAME(p_package) || '.' || 
                  DBMS_ASSERT.SIMPLE_SQL_NAME(p_func) || ') t';
 
         BEGIN
             EXECUTE IMMEDIATE l_sql BULK COLLECT INTO l_rows;
-            process_metrics(l_rows); -- Llamada simple
+            process_metrics(l_rows); 
         EXCEPTION 
             WHEN OTHERS THEN
-                PLTelemetry.log('ERROR', 'Fallo en ' || p_code || ': ' || SQLERRM);
+                -- CORREGIDO: Uso de Backtrace en lugar de SQLERRM
+                PLTelemetry.log('ERROR', 'Fallo en ' || p_code || ': ' || 
+                    SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                           DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
         END;
     END;
 
@@ -83,20 +81,14 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
                 -- === MODO MULTI-TENANT ===
                 FOR t IN (SELECT tenant_id FROM plt_tenants WHERE is_enabled = 1) LOOP
                     
-                    -- 1. ESTABLECER CONTEXTO GLOBAL
                     PLTelemetry.set_tenant(t.tenant_id);
-                    
-                    -- 2. EJECUTAR (El paquete PLTelemetry usará ese tenant internamente)
                     run_collector_dynamic(r.collector_code, r.reader_package, r.reader_function);
                     
                 END LOOP;
                 
             ELSE
                 -- === MODO GLOBAL ===
-                -- 1. ESTABLECER CONTEXTO DEFAULT
                 PLTelemetry.set_tenant('default');
-                
-                -- 2. EJECUTAR
                 run_collector_dynamic(r.collector_code, r.reader_package, r.reader_function);
             END IF;
 
@@ -110,6 +102,12 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         END LOOP;
         
         COMMIT;
+    EXCEPTION 
+        WHEN OTHERS THEN
+            ROLLBACK;
+            PLTelemetry.log('ERROR', 'Error critico en run_collection_cycle: ' || 
+                SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
+                       DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
 END PLT_DB_MONITOR_LOGIC;

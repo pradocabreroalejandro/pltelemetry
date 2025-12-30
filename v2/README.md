@@ -1,163 +1,320 @@
-¡Claro que sí! Tienes toda la razón, copiar texto renderizado es un infierno.
+````md
+# PLTelemetry — Oracle PL/SQL OpenTelemetry SDK
 
-Aquí tienes el **código fuente crudo** del `README.md`.
+Your database is already the **most critical service** in your system.  
+Yet, in most observability stacks, it’s still a **black box**.
 
-Solo tienes que darle al botón de **"Copiar"** que aparece arriba a la derecha de este bloque negro, pegarlo en tu editor de texto favorito y guardarlo como `README.md`.
+**PLTelemetry** removes that blind spot.
 
-```markdown
-# PLTelemetry V2 (Lean Edition)
+It is a high-performance, native **PL/SQL OpenTelemetry SDK** designed for enterprise Oracle environments, allowing you to instrument stored procedures, triggers, and jobs **directly from the database layer**, without Java, external runtimes, or performance penalties.
 
-**A lightweight, asynchronous OpenTelemetry SDK for Oracle PL/SQL.**
+PLTelemetry integrates seamlessly with modern observability platforms such as **Jaeger, Prometheus, Grafana, Datadog, or Dynatrace**, turning Oracle Database into a first-class citizen in distributed tracing and metrics.
 
-PLTelemetry allows legacy Oracle databases to participate in modern distributed tracing. It is designed with one goal: **zero impact on business transaction latency.**
+---
 
-Instead of making synchronous HTTP calls to an OTLP collector (which blocks the PL/SQL execution), this SDK writes telemetry data as pre-formatted JSON into a local high-performance queue table. An external agent (Go/Rust/Java) is responsible for reading this queue and pushing it to observability platforms like Grafana, Jaeger, or Datadog.
+## 🚀 Key Features
 
-## Core Philosophy
+PLTelemetry is built with a **Database-First mindset**: stability, performance, and operational safety come before everything else.
 
-1.  **Asynchronous:** "Fire and forget." The PL/SQL code writes to a local table and moves on.
-2.  **Stateful:** Uses Oracle Session Memory (Package Variables) to manage span nesting and context automatically.
-3.  **Multi-Tenant:** Built from the ground up to segregate data by tenant ID.
-4.  **Standard:** Generates OpenTelemetry-compatible JSON structures natively.
+---
 
-## Architecture
+## 🛡️ Zero-Dependency Core
+
+- **Pure PL/SQL implementation**  
+  No Java in the database. No DLLs. No shared objects. No external binaries.
+
+- **Self-contained by design**  
+  All logic lives inside your schema, making it easy to audit, deploy, back up, and version using standard Oracle tooling.
+
+- **Security-friendly**  
+  By avoiding external runtimes, PLTelemetry preserves the native security posture of hardened Oracle environments.
+
+---
+
+## ⚡ Asynchronous Architecture (“Fire-and-Forget”)
+
+- **Decoupled instrumentation**  
+  Telemetry is enqueued into a high-throughput staging table (`PLT_QUEUE`).  
+  Calls to `start_span` or `log` complete in microseconds.
+
+- **Protected critical path**  
+  JSON serialization and OTLP network delivery happen asynchronously in background components.  
+  Your business transactions stay fast and predictable.
+
+---
+
+## 🔗 Automatic Context Propagation
+
+- **W3C Trace Context compliant**  
+  Incoming `traceparent` headers from Node.js, Java, or any OTel-enabled service are automatically continued.
+
+- **Smart auto-instrumentation**  
+  Leveraging `UTL_CALL_STACK`, PLTelemetry detects the running package and procedure and auto-populates:
+  - `code.namespace`
+  - `code.function`
+
+  No manual wiring. No boilerplate.
+
+---
+
+## 🔄 Resilience & Failover
+
+### Hybrid Delivery Model
+
+- **Primary path**  
+  An external **Go Agent** (recommended) consumes data from `PLT_QUEUE` with maximum throughput.
+
+- **Failover path**  
+  If the agent becomes unavailable, the internal `PLT_FAILOVER_JOB` activates and delivers telemetry using `UTL_HTTP`.
+
+- **Self-healing behaviour**  
+  Agent heartbeats are continuously monitored and delivery mode switches automatically to prevent data loss.
+
+---
+
+## 🏢 Multi-Tenant Support
+
+- **SaaS-native by design**  
+  Every span, metric, and log entry is tagged with a `tenant_id`.
+
+- **Isolation & routing**  
+  Telemetry can be filtered per tenant or routed to different backends without code changes.
+
+---
+
+## 📊 Automated Metric Collectors
+
+- **Database & system metrics**  
+  Background jobs collect internal Oracle statistics from:
+  - `V$SYSSTAT`
+  - `V$SESSION`
+  - `V$OSSTAT`
+
+  These are exposed as standard OpenTelemetry metrics.
+
+- **Business metrics**  
+  Define custom collectors to convert business data (for example, *orders per minute*) into Prometheus-ready gauges and counters.
+
+---
+
+## 🏗️ Architecture
+
+PLTelemetry follows a strict **Store-and-Forward** pattern to minimise overhead on business transactions.
 
 ```mermaid
-graph LR
-    A[PL/SQL Code] -->|API Calls| B(PLTelemetry Package)
-    B -->|Internal Stack| C{Session Memory}
-    B -->|Native JSON| D[(PLT_QUEUE Table)]
-    D -.->|Async Consumption| E[External Agent]
-    E -->|OTLP| F[Observability Backend]
+graph TD
+    subgraph "Transaction Boundary (Microseconds)"
+        APP[PL/SQL Application] -->|1. start_span / log| SDK[PLTelemetry API]
+        SDK -->|2. INSERT (Fast)| Q[PLT_QUEUE Table]
+    end
+    
+    subgraph "Background Processing"
+        Q -.->|3a. Bulk Fetch| AGENT[Go Agent (Preferred)]
+        Q -.->|3b. Failover Fetch| BRIDGE[PLT_OTLP_BRIDGE]
+        JOB[PLT_FAILOVER_JOB] -->|Trigger| BRIDGE
+    end
 
-```
+    AGENT -->|4. OTLP gRPC/HTTP| COLLECTOR[OpenTelemetry Collector]
+    BRIDGE -->|4. OTLP HTTP| COLLECTOR
+    
+    COLLECTOR --> JAEGER[Jaeger (Traces)]
+    COLLECTOR --> PROM[Prometheus (Metrics)]
+````
 
-## Installation
+### Data Flow
 
-The installation is scripted and dependency-aware.
+* **Instrumentation**
+  Application code calls the PLTelemetry API.
 
-1. Connect to your Oracle Database (12.2 or higher recommended for Native JSON).
-2. Run the installer:
+* **Ingestion**
+  Telemetry is persisted in `PLT_QUEUE`.
+  The insert is part of the business transaction: if the transaction rolls back, telemetry is discarded.
+
+* **Export**
+
+  * The Go Agent batches and exports records via OTLP gRPC (preferred).
+  * The PL/SQL bridge delivers data via HTTP if the agent is offline.
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+
+* **Database**: Oracle Database 12c R2 or higher (19c / 21c / 23c recommended)
+* **Privileges**:
+  `CREATE TABLE`, `CREATE PROCEDURE`, `CREATE TYPE`, `CREATE JOB`
+* **Network access**:
+  OpenTelemetry Collector (default HTTP port `4318`)
+* **Optional (SYSDBA)**:
+  Required only to collect system-level metrics from `V$` views
+
+---
+
+### Installation Steps
+
+#### 1. Create Types & Tables
 
 ```sql
-@install.sql
-
+@00_types.sql
+@01_tables.sql
 ```
 
-*This will drop any V1 tables, create the new V2 schema (Queue, Config, Errors), and compile the packages.*
+#### 2. Grant System Permissions (Run as SYS)
 
-## Usage Guide
+```sql
+@03_permissions_sys.sql
+```
 
-### 1. Initialization (Multi-Tenancy)
+#### 3. Seed Configuration Data
 
-Always start by defining the context. This ensures all subsequent data is tagged correctly.
+```sql
+@02_data.sql
+```
+
+#### 4. Deploy Packages
+
+* `PLTelemetry.pks / pkb` — Core SDK & public API
+* `PLT_CONFIGURATION.pks / pkb` — High-performance configuration manager
+* `PLT_OTLP_BRIDGE.pks / pkb` — Internal HTTP exporter
+* `PLT_DB_METRIC_READER.pks / pkb` — Metric extraction
+* `PLT_DB_MONITOR_LOGIC.pks / pkb` — Metric orchestration
+
+#### 5. Enable Background Jobs
+
+```sql
+@04_jobs.sql
+```
+
+---
+
+## ⚙️ Configuration
+
+Configuration is stored in `PLT_SYS_CONFIG` and served via **Oracle Result Cache**, ensuring near-zero overhead even under heavy load.
+
+### Connection Settings
 
 ```sql
 BEGIN
-    -- If you don't set this, it defaults to 'default'
-    PLTelemetry.set_tenant('ACME_CORP');
+    PLT_CONFIGURATION.set_param(
+        'OTLP', 'ENDPOINT_URL', 'http://otel-collector:4318'
+    );
+
+    PLT_CONFIGURATION.set_param(
+        'OTLP', 'SERVICE_NAME', 'oracle-db-prod'
+    );
+
+    COMMIT;
 END;
 /
-
 ```
 
-### 2. Tracing (Nested Spans)
+---
 
-The SDK uses an internal LIFO stack to manage parent-child relationships. You don't need to pass IDs around; just open and close spans.
+## ⚙️ Throttling & Sampling (Adaptive Load Control)
 
-```sql
-DECLARE
-    l_waste VARCHAR2(100); -- To capture the function return
+Telemetry behaviour is controlled via pulse modes defined in `PLT_PULSE_THROTTLING_CONFIG`.
+
+| Mode   | Behaviour          |
+| ------ | ------------------ |
+| PULSE1 | 100% sampling      |
+| PULSE2 | 75% sampling       |
+| PULSE3 | 50% sampling       |
+| PULSE4 | 10% sampling       |
+| COMA   | Telemetry disabled |
+
+Modes can be switched dynamically without redeploying code.
+
+---
+
+## 💻 Usage Examples
+
+### Distributed Tracing
+
+```plsql
+PROCEDURE process_large_order(p_order_id NUMBER) IS
+    l_root_span_id VARCHAR2(64);
+    l_child_span   VARCHAR2(64);
 BEGIN
-    -- 1. Root Span
-    l_waste := PLTelemetry.start_span('process_order');
-    
-        -- 2. Nested Span (Automatically linked to process_order)
-        l_waste := PLTelemetry.start_span('validate_stock');
-            -- Simulate work
-            DBMS_LOCK.SLEEP(0.1);
-        PLTelemetry.end_span('OK'); -- Closes validate_stock
+    l_root_span_id := PLTelemetry.start_span('process_large_order');
 
-        -- 3. Another Nested Span
-        l_waste := PLTelemetry.start_span('charge_credit_card');
-            -- Log inside a span (Automatically correlated)
-            PLTelemetry.log('INFO', 'Contacting payment gateway...');
-        PLTelemetry.end_span('OK'); -- Closes charge_credit_card
+    PLTelemetry.attr('order.id', p_order_id);
+    PLTelemetry.attr('db.user', USER);
+    PLTelemetry.attr('meta.priority', 'HIGH');
 
-    -- Close Root Span
-    PLTelemetry.end_span('OK', 'Order processed successfully');
-    
-    COMMIT; -- Persist to Queue
+    l_child_span := PLTelemetry.start_span('validate_inventory');
+    -- complex logic
+    PLTelemetry.end_span('OK');
+
+    UPDATE orders SET status = 'PROCESSED' WHERE id = p_order_id;
+
+    PLTelemetry.log(
+        'INFO',
+        'Order state updated',
+        PLTelemetry.attr('old_status', 'NEW'),
+        PLTelemetry.attr('new_status', 'PROCESSED')
+    );
+
+    PLTelemetry.end_span('OK');
+EXCEPTION
+    WHEN OTHERS THEN
+        PLTelemetry.log(
+            'ERROR',
+            'Critical failure processing order: ' || SQLERRM
+        );
+        PLTelemetry.end_span('ERROR', SQLERRM);
+        RAISE;
 END;
-/
-
 ```
 
-### 3. Logs
+---
 
-Logs are automatically correlated with the active span. If no span is active, they are recorded as standalone events.
+## 🔍 Monitoring & Troubleshooting
+
+* **Internal SDK errors**
 
 ```sql
--- Simple Log
-PLTelemetry.log('INFO', 'System startup complete');
-
--- Log with Attributes (Context)
-DECLARE
-    l_attrs PLTelemetry.t_attributes;
-BEGIN
-    l_attrs(1).key := 'user_id';   l_attrs(1).value := '1001';
-    l_attrs(2).key := 'module';    l_attrs(2).value := 'billing';
-    
-    PLTelemetry.log('ERROR', 'Payment failed', l_attrs);
-END;
-/
-
+SELECT *
+FROM plt_telemetry_errors
+ORDER BY error_time DESC;
 ```
 
-### 4. Metrics (Typed)
-
-It is crucial to distinguish between **Gauges** (absolute values) and **Counters** (deltas) for correct visualization.
+* **Queue health**
 
 ```sql
--- GAUGE: An absolute value at a specific point in time.
--- Example: CPU usage, Memory, Disk Space, Temperature.
-PLTelemetry.log_metric(
-    p_name  => 'db.tablespace.used_pct',
-    p_value => 85.5,
-    p_type  => PLTelemetry.C_METRIC_GAUGE,
-    p_unit  => '%'
-);
-
--- COUNTER: A delta value to be added to a total.
--- Example: Number of requests, Errors, Bytes processed.
-PLTelemetry.log_metric(
-    p_name  => 'app.orders.count',
-    p_value => 1, -- Increment by 1
-    p_type  => PLTelemetry.C_METRIC_COUNTER,
-    p_unit  => '1'
-);
-
+SELECT status, COUNT(*)
+FROM plt_queue
+GROUP BY status;
 ```
 
-## Data Internals
+* **Failover status**
+  Inspect `PLT_AGENT_REGISTRY` to determine whether the system is operating in **PRIMARY** or **FAILOVER** mode.
 
-All data is stored in the `PLT_QUEUE` table waiting for the agent.
+---
 
-| Column | Description |
-| --- | --- |
-| `ID` | Identity / Sequence. |
-| `ITEM_TYPE` | `TRACE`, `METRIC`, or `LOG`. |
-| `PAYLOAD` | The OTLP-ready JSON (CLOB). |
-| `TENANT_ID` | For partitioning and filtering by the consumer agent. |
-| `STATUS` | `NEW` (Ready), `PROCESSING`, `FAILED`. |
+## ❌ Who This Is NOT For
 
-**Debugging:**
-If something goes wrong inside the package (e.g., JSON generation error), it catches the exception and logs it to `PLT_TELEMETRY_ERRORS` using an autonomous transaction, so your business logic never fails due to observability issues.
+PLTelemetry is intentionally opinionated.
 
-## License
+It is **not** designed for:
 
-MIT License.
+* Legacy systems with no OpenTelemetry backend
+* Applications that rely on `DBMS_OUTPUT` for logging
+* Environments where external collectors or agents are not allowed at all
+* Teams looking for “quick debug logs” instead of long-term observability
 
-```
+---
+
+## 🤝 Contributing
+
+Contributions are welcome: performance optimisations, new metric collectors, documentation improvements, or architectural discussions.
+
+Open an Issue or submit a Pull Request.
+
+---
+
+## 📄 License
+
+MIT License
 
 ```
