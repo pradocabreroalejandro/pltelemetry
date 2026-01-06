@@ -3,8 +3,10 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 100 # 🔥 Subimos a 100MB por si acaso
       http:
         endpoint: 0.0.0.0:4318
+        max_request_body_size: 104857600 # 🔥 100MB
         cors:
           allowed_origins: ["*"]
           allowed_headers: ["*"]
@@ -15,28 +17,27 @@ receivers:
         - job_name: 'woofy-agent-self-metrics'
           scrape_interval: 10s
           static_configs:
-            - targets: ['host.docker.internal:8080'] # Si corres Woofy fuera de docker
-            # - targets: ['woofy-agent:8080']        # Si Woofy corre en contenedor
+            - targets: ['host.docker.internal:8080'] 
 
   prometheus:
     config:
       scrape_configs:
         - job_name: 'otel-collector'
-          scrape_interval: 30s    # Moderado
+          scrape_interval: 30s
           static_configs:
             - targets: ['localhost:8888']
 
 processors:
-  # Memory limiter ajustado para 1.2GB total
+  # Memory limiter un poco más agresivo para proteger al collector
   memory_limiter:
-    limit_mib: 1000         # Límite conservador dentro del contenedor
-    spike_limit_mib: 200    # Spike razonable
-    check_interval: 200ms   # Chequeo frecuente pero no excesivo
+    limit_mib: 1500
+    spike_limit_mib: 500
+    check_interval: 5s
 
-  # Batch processor equilibrado
+  # Batch processor: "Más vale muchos viajes pequeños que uno grande y volcar el camión"
   batch:
-    timeout: 200ms          # Balance entre latencia y throughput
-    send_batch_size: 1000   # Lotes medianos
+    timeout: 2s             # Esperamos más
+    send_batch_size: 2000   # Lotes medianos (no 5000, probemos con 2000)
     send_batch_max_size: 2000
 
   resource:
@@ -49,38 +50,33 @@ processors:
         action: upsert
 
 exporters:
-  # Tempo OK
   otlp/tempo:
     endpoint: http://tempo:4317
     tls:
       insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 60s # Más paciencia
 
-  # Loki OK
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
+    # 🔥 Timeout explícito para Loki (vital si Loki va lento)
+    timeout: 10s 
 
-  # Prometheus moderado
   prometheus:
     endpoint: "0.0.0.0:8889"
     namespace: "pltelemetry"
     send_timestamps: true
-    metric_expiration: 60m      # 1 hora - balance memoria/utilidad
+    metric_expiration: 60m
     resource_to_telemetry_conversion:
       enabled: true
     enable_open_metrics: true
 
-  # Debug muy limitado
-  debug:
-    verbosity: detailed
-    #verbosity: basic
-    #sampling_initial: 1
-    #sampling_thereafter: 1000   # Muy poco verbose
-
-# 🆕 EXTENSIONES - AQUÍ ESTÁ LA MAGIA
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
-    path: /
   pprof:
     endpoint: 0.0.0.0:1777
   zpages:
@@ -90,7 +86,7 @@ service:
   extensions: [health_check, pprof, zpages]
   telemetry:
     logs:
-      level: "info" # Cambia 'warn' a 'info' para ver al menos que arranca bien
+      level: "info"
     metrics:
       level: "basic"    
 
@@ -98,14 +94,14 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters: [otlp/tempo, debug] # <--- AÑADIDO
+      exporters: [otlp/tempo]
 
     metrics:
       receivers: [otlp, prometheus, prometheus/woofy]
       processors: [memory_limiter, resource, batch]
-      exporters: [prometheus, debug]  # <--- ¡AQUÍ ESTÁ LA CLAVE!
+      exporters: [prometheus]
 
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [loki, debug]        # <--- AÑADIDO
+      exporters: [loki]

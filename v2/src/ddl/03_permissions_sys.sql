@@ -13,6 +13,8 @@ GRANT SELECT ON V_$SYSSTAT TO PLTELEMETRY;
 GRANT SELECT ON V_$OSSTAT TO PLTELEMETRY;
 GRANT SELECT ON V_$PROCESS TO PLTELEMETRY;
 GRANT SELECT ON V_$INSTANCE TO PLTELEMETRY; -- Opcional pero útil para metadatos
+GRANT CREATE JOB TO pltelemetry;
+GRANT MANAGE SCHEDULER TO pltelemetry; -- Para que pueda matarlos si se vuelven locos
 
 -- 2. ACLs PARA UTL_HTTP (Necesario para el Bridge PL/SQL)
 BEGIN

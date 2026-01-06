@@ -50,4 +50,6 @@ INSERT INTO plt_metric_collectors (collector_code, reader_package, reader_functi
 VALUES ('STORAGE', 'PLT_DB_METRIC_READER', 'get_storage_metrics', 60, 'GLOBAL');
 
 COMMIT;
+/
+
 PROMPT ✅ Datos iniciales cargados.

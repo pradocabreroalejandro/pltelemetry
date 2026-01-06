@@ -424,6 +424,7 @@ exporters:
     endpoint: http://tempo:4317
     tls:
       insecure: true
+    compression: none
       
   # Metrics to Prometheus
   prometheus:

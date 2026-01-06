@@ -1,8 +1,25 @@
 # =============================================================================
-# PLTelemetry Master Stack - The "Golden" Version
+# PLTelemetry Master Stack - The "Golden" Version (With Portainer)
 # =============================================================================
 
 services:
+  # ---------------------------------------------------------------------------
+  # 🕵️‍♀️ MONITORIZACIÓN DE DOCKER - Portainer
+  # ---------------------------------------------------------------------------
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: plt-portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - portainer_data:/data
+    networks:
+      - pltelemetry-network
+
   # ---------------------------------------------------------------------------
   # INFRASTRUCTURE - Oracle Database
   # ---------------------------------------------------------------------------
@@ -34,6 +51,8 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: plt-otel-collector
+    environment:
+      - GOMAXPROCS=8
     # IMPORTANTE: Mapeamos tu fichero otel-collector-config.yaml
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
@@ -65,7 +84,7 @@ services:
       - tempo-data:/var/tempo
     ports:
       - "3200:3200" # API
-      - "4317"      # gRPC interno (no hace falta exponerlo al host, pero ayuda a debug)
+      - "4317"      # gRPC interno
     networks:
       - pltelemetry-network
     restart: unless-stopped
@@ -127,9 +146,6 @@ services:
       - GF_SMTP_FROM_ADDRESS=pltelemetry@grafana.local
     volumes:
       - grafana-data:/var/lib/grafana
-      # Si tienes carpetas de provisioning locales, descomenta esto:
-      # - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      # - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3020:3000" # Grafana en puerto 3020
     depends_on:
@@ -142,7 +158,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # EXTRAS - MailHog & Servicios
+  # EXTRAS - MailHog
   # ---------------------------------------------------------------------------
   mailhog:
     image: mailhog/mailhog:latest
@@ -154,32 +170,19 @@ services:
       - pltelemetry-network
     restart: unless-stopped
 
-  # Tus servicios de ejemplo (mantengo uno como referencia, añade los otros si quieres)
-  batch-processor:
-     # build: .  <-- OJO: Si no vas a hacer build ahora, comenta esto y usa image si la tienes
-     # O asumo que la imagen ya existe localmente o usas contexto
-     image: node:18-alpine # Placeholder si no quieres buildear ahora
-     container_name: plt-batch-processor
-     ports:
-       - "8004:8004"
-     environment:
-       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-     networks:
-       - pltelemetry-network
-
 # =============================================================================
 # VOLUMES & NETWORKS
 # =============================================================================
-# =============================================================================
-# VOLUMES - CONECTANDO AL PASADO (MIGRACIÓN)
-# =============================================================================
 volumes:
-  # Base de Datos (Lo más importante)
+  # Portainer (Nuevo - Automático)
+  portainer_data:
+
+  # Base de Datos (Manual)
   oracle-data:
     external: true
     name: docker_compose_oracle-data 
 
-  # Observabilidad (Para no perder tus dashboards ni historia)
+  # Observabilidad (Manuales)
   grafana-data:
     external: true
     name: docker_compose_grafana-data
