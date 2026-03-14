@@ -1,17 +1,28 @@
 -- =============================================================================
 -- 01_tables.sql
--- Definición del Esquema de Base de Datos
+-- Definición del Esquema de Base de Datos (Topología Rotativa v2)
 -- =============================================================================
 PROMPT [01] Creating Tables and Indexes...
 
 -- CLEANUP (Ordenado por dependencias)
 BEGIN
+    -- Borrado de objetos antiguos y nuevos
     FOR t IN (SELECT table_name FROM user_tables WHERE table_name IN (
         'PLT_SYS_CONFIG', 'PLT_METRIC_COLLECTORS', 'PLT_TENANTS', 
-        'PLT_QUEUE', 'PLT_PULSE_THROTTLING_CONFIG', 
+        'PLT_QUEUE', 'PLT_QUEUE_01', 'PLT_QUEUE_02', 'PLT_QUEUE_REGISTRY',
+        'PLT_PULSE_THROTTLING_CONFIG', 
         'PLT_AGENT_REGISTRY', 'PLT_TELEMETRY_ERRORS', 'PLT_ACTIVATION_RULES'
     )) LOOP
         EXECUTE IMMEDIATE 'DROP TABLE ' || t.table_name || ' CASCADE CONSTRAINTS';
+    END LOOP;
+
+    -- Borrado de Vistas y Sinónimos de la topología
+    FOR v IN (SELECT view_name FROM user_views WHERE view_name = 'PLT_QUEUE_READER') LOOP
+        EXECUTE IMMEDIATE 'DROP VIEW ' || v.view_name;
+    END LOOP;
+    
+    FOR s IN (SELECT synonym_name FROM user_synonyms WHERE synonym_name = 'PLT_QUEUE_WRITER') LOOP
+        EXECUTE IMMEDIATE 'DROP SYNONYM ' || s.synonym_name;
     END LOOP;
 END;
 /
@@ -28,20 +39,62 @@ CREATE TABLE plt_sys_config (
     CONSTRAINT pk_plt_sys_config PRIMARY KEY (config_group, config_key)
 );
 
--- 2. COLA DE MENSAJES (El corazón del sistema)
-CREATE TABLE plt_queue (
+-- 2. TOPOLOGÍA DE COLAS (Partitioning Lógico)
+-- 2.1 Registro de Estado (El cerebro)
+CREATE TABLE plt_queue_registry (
+    partition_name  VARCHAR2(30) PRIMARY KEY, -- 'PLT_QUEUE_01', 'PLT_QUEUE_02'
+    is_active       VARCHAR2(1) DEFAULT 'N',  -- 'Y' = Donde se hacen INSERTS
+    state           VARCHAR2(20),             -- 'ACTIVE', 'DRAINING', 'READY'
+    last_truncate   TIMESTAMP WITH TIME ZONE,
+    row_count_est   NUMBER,
+    bytes_est       NUMBER
+);
+
+-- 2.2 Tabla Física 01 (Activa por defecto)
+CREATE TABLE plt_queue_01 (
     id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     item_type       VARCHAR2(20) NOT NULL CHECK (item_type IN ('TRACE', 'METRIC', 'LOG')),
     payload         CLOB         NOT NULL,
     status          VARCHAR2(20) DEFAULT 'NEW' NOT NULL CHECK (status IN ('NEW', 'PROCESSING', 'FAILED', 'PROCESSED')),
     retry_count     NUMBER       DEFAULT 0     NOT NULL,
-    process_attempts NUMBER      DEFAULT 0     NOT NULL, -- Integrado desde el ALTER
+    process_attempts NUMBER      DEFAULT 0     NOT NULL,
     error_message   VARCHAR2(4000),
     created_at      TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
     updated_at      TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
     tenant_id       VARCHAR2(100) DEFAULT 'default'
 );
-CREATE INDEX idx_plt_queue_main ON plt_queue(status, tenant_id, id); 
+CREATE INDEX idx_plt_queue_main_01 ON plt_queue_01(status, tenant_id, id); 
+
+-- 2.3 Tabla Física 02 (Reserva por defecto)
+CREATE TABLE plt_queue_02 (
+    id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    item_type       VARCHAR2(20) NOT NULL CHECK (item_type IN ('TRACE', 'METRIC', 'LOG')),
+    payload         CLOB         NOT NULL,
+    status          VARCHAR2(20) DEFAULT 'NEW' NOT NULL CHECK (status IN ('NEW', 'PROCESSING', 'FAILED', 'PROCESSED')),
+    retry_count     NUMBER       DEFAULT 0     NOT NULL,
+    process_attempts NUMBER      DEFAULT 0     NOT NULL,
+    error_message   VARCHAR2(4000),
+    created_at      TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
+    updated_at      TIMESTAMP    DEFAULT SYSTIMESTAMP NOT NULL,
+    tenant_id       VARCHAR2(100) DEFAULT 'default'
+);
+CREATE INDEX idx_plt_queue_main_02 ON plt_queue_02(status, tenant_id, id); 
+
+-- 2.4 Inicialización del Registro
+INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_01', 'Y', 'ACTIVE');
+INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_02', 'N', 'READY');
+
+-- 2.5 Sinónimo de Escritura (Apunta a la activa)
+CREATE OR REPLACE SYNONYM plt_queue_writer FOR plt_queue_01;
+
+-- 2.6 Vista de Lectura (Unifica ambas para el Agente)
+CREATE OR REPLACE VIEW plt_queue_reader AS
+SELECT id, item_type, payload, status, retry_count, process_attempts, error_message, created_at, updated_at, tenant_id, 'PLT_QUEUE_01' as origin_table 
+FROM plt_queue_01
+UNION ALL
+SELECT id, item_type, payload, status, retry_count, process_attempts, error_message, created_at, updated_at, tenant_id, 'PLT_QUEUE_02' as origin_table 
+FROM plt_queue_02;
+
 
 -- 3. REGISTRO DE AGENTES (Heartbeats)
 CREATE TABLE plt_agent_registry (
@@ -114,4 +167,6 @@ CREATE TABLE plt_metric_collectors (
     last_run            TIMESTAMP WITH TIME ZONE
 );
 
-PROMPT ✅ Tablas creadas correctamente.
+COMMIT;
+
+PROMPT ✅ Tablas y Topología Rotativa (v2) creadas correctamente.

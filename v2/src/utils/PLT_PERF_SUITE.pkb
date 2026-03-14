@@ -192,14 +192,32 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
         DBMS_OUTPUT.PUT_LINE('🚀 Lanzados ' || p_concurrent_users || ' usuarios concurrentes (Escenario: '||p_scenario||').');
     END spawn_load_test;
 
+    -- =========================================================================
+    -- RESET QUEUE (ADAPTADO A NUEVA TOPOLOGÍA 01/02)
+    -- =========================================================================
     PROCEDURE reset_queue IS
     BEGIN
-        EXECUTE IMMEDIATE 'TRUNCATE TABLE plt_queue';
-        -- Limpiamos logs de tests anteriores para tener la tabla de resultados limpia
-        DELETE FROM plt_telemetry_errors WHERE module_name = 'PERF_TEST';
+        -- 1. Limpieza profunda de las tablas físicas
+        -- Usamos SQL Dinámico por si las tablas no existieran (aunque deberían)
+        BEGIN EXECUTE IMMEDIATE 'TRUNCATE TABLE plt_queue_01'; EXCEPTION WHEN OTHERS THEN NULL; END;
+        BEGIN EXECUTE IMMEDIATE 'TRUNCATE TABLE plt_queue_02'; EXCEPTION WHEN OTHERS THEN NULL; END;
+
+        -- 2. Reset del Registry (Cerebro)
+        -- Lo devolvemos al estado Factory Default: 01 Activa, 02 Ready.
+        DELETE FROM plt_queue_registry;
+        INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_01', 'Y', 'ACTIVE');
+        INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_02', 'N', 'READY');
+
+        -- 3. Reset del Puntero (Sinónimo)
+        -- Nos aseguramos que PLTelemetry apunte a la 01
+        EXECUTE IMMEDIATE 'CREATE OR REPLACE SYNONYM plt_queue_writer FOR plt_queue_01';
+
+        -- 4. Limpieza de resultados de pruebas anteriores
+        DELETE FROM plt_telemetry_errors WHERE module_name LIKE 'PERF_%';
+        
         COMMIT;
-        DBMS_OUTPUT.PUT_LINE('🗑️ Cola y logs de prueba vaciados.');
-    END;
+        DBMS_OUTPUT.PUT_LINE('🗑️ Topología de colas reseteada (01 y 02 truncadas, Registry reiniciado).');
+    END reset_queue;
 
 END PLT_PERF_SUITE;
 /

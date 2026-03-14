@@ -46,6 +46,32 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------
+  # API REST - Oracle ORDS (Standalone con Jetty)
+  # ---------------------------------------------------------------------------
+  ords:
+    # CAMBIO AQUÍ: Usamos la ruta completa al registro de Oracle
+    image: container-registry.oracle.com/database/ords:latest
+    container_name: plt-ords
+    restart: unless-stopped
+    environment:
+      - ORACLE_HOST=oracle-db
+      - ORACLE_PORT=1521
+      - ORACLE_SERVICE=FREEPDB1
+      - ORACLE_PWD=plt
+      - ORDS_PWD=plt
+      - JAVA_OPTS=-Xms512M -Xmx512M
+    ports:
+      - "8080:8080"
+    depends_on:
+      oracle-db:
+        condition: service_healthy
+    networks:
+      - pltelemetry-network
+    volumes:
+      - ords-config:/etc/ords/config
+      - ords-secrets:/etc/ords/secrets
+
+  # ---------------------------------------------------------------------------
   # CEREBRO - OpenTelemetry Collector
   # ---------------------------------------------------------------------------
   otel-collector:
@@ -198,6 +224,10 @@ volumes:
   tempo-data:
     external: true
     name: docker_compose_tempo-data
+
+  # ORDS (Nuevos - Automáticos para guardar la config de Jetty/ORDS)
+  ords-config:
+  ords-secrets:
 
 networks:
   pltelemetry-network:

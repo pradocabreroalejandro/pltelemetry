@@ -118,7 +118,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         PRAGMA AUTONOMOUS_TRANSACTION;
         l_tenant_local VARCHAR2(100) := g_tenant_id;
     BEGIN
-        INSERT INTO plt_queue (item_type, payload, tenant_id)
+        INSERT INTO plt_queue_writer (item_type, payload, tenant_id)
         VALUES (p_type, p_payload, l_tenant_local);
         COMMIT;
     EXCEPTION WHEN OTHERS THEN ROLLBACK; log_internal_error('Enqueue failed');
@@ -375,7 +375,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
     PROCEDURE process_queue(p_batch_size NUMBER DEFAULT 50) IS
         CURSOR c_pending IS
             SELECT id, item_type, payload
-            FROM plt_queue
+            FROM plt_queue_writer
             WHERE status = 'NEW'
             ORDER BY id ASC
             FETCH FIRST p_batch_size ROWS ONLY;
@@ -391,7 +391,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
 
                 PLT_OTLP_BRIDGE.process_payload(r.item_type, r.payload);
 
-                UPDATE plt_queue 
+                UPDATE plt_queue_writer 
                 SET status = 'PROCESSED', updated_at = SYSTIMESTAMP 
                 WHERE id = r.id;
                 
@@ -403,7 +403,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
                     1, 4000
                 );
 
-                UPDATE plt_queue 
+                UPDATE plt_queue_writer 
                 SET status = 'FAILED', 
                     error_message = l_err_msg, 
                     retry_count = retry_count + 1,
