@@ -1,0 +1,107 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 100 # 🔥 Subimos a 100MB por si acaso
+      http:
+        endpoint: 0.0.0.0:4318
+        max_request_body_size: 104857600 # 🔥 100MB
+        cors:
+          allowed_origins: ["*"]
+          allowed_headers: ["*"]
+
+  prometheus/woofy:
+    config:
+      scrape_configs:
+        - job_name: 'woofy-agent-self-metrics'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['host.docker.internal:8080'] 
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'otel-collector'
+          scrape_interval: 30s
+          static_configs:
+            - targets: ['localhost:8888']
+
+processors:
+  # Memory limiter un poco más agresivo para proteger al collector
+  memory_limiter:
+    limit_mib: 1500
+    spike_limit_mib: 500
+    check_interval: 5s
+
+  # Batch processor: "Más vale muchos viajes pequeños que uno grande y volcar el camión"
+  batch:
+    timeout: 2s             # Esperamos más
+    send_batch_size: 2000   # Lotes medianos (no 5000, probemos con 2000)
+    send_batch_max_size: 2000
+
+  resource:
+    attributes:
+      - key: otel.service.name
+        from_attribute: service.name
+        action: upsert
+      - key: otel.service.version
+        from_attribute: service.version
+        action: upsert
+
+exporters:
+  otlp/tempo:
+    endpoint: http://tempo:4317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 10s
+      max_elapsed_time: 60s # Más paciencia
+
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    # 🔥 Timeout explícito para Loki (vital si Loki va lento)
+    timeout: 10s 
+
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: "pltelemetry"
+    send_timestamps: true
+    metric_expiration: 60m
+    resource_to_telemetry_conversion:
+      enabled: true
+    enable_open_metrics: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  telemetry:
+    logs:
+      level: "info"
+    metrics:
+      level: "basic"    
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/tempo]
+
+    metrics:
+      receivers: [otlp, prometheus, prometheus/woofy]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]
+
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [loki]

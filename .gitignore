@@ -72,3 +72,6 @@ docs/_site/
 *.sql.tmp
 *.sql.bak
 spool*.txt
+
+# Gemini
+GEMINI.md
