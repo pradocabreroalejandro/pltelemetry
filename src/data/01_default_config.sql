@@ -29,7 +29,11 @@ PROMPT Default configuration loaded.
 
 -- DATOS INICIALES (Ejemplos)
 -- 1. Por defecto, TODO apagado (Seguridad por diseño)
-INSERT INTO plt_activation_rules (object_pattern, is_enabled, sample_rate) 
-VALUES ('*', 'N', 0);
+-- Usamos MERGE para evitar ORA-00001 si ya existe (idempotente)
+MERGE INTO plt_activation_rules t
+USING (SELECT '*' AS pattern, 'N' AS enabled, 0 AS rate FROM DUAL) s
+ON (t.object_pattern = s.pattern)
+WHEN MATCHED THEN UPDATE SET t.is_enabled = s.enabled, t.sample_rate = s.rate
+WHEN NOT MATCHED THEN INSERT (object_pattern, is_enabled, sample_rate) VALUES (s.pattern, s.enabled, s.rate);
 
 COMMIT;

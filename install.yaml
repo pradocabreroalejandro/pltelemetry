@@ -1,0 +1,24 @@
+# =============================================================================
+# PLTelemetry — Installation Configuration (Oracle 23ai Test)
+# =============================================================================
+
+connection:
+  schema: "PLTELEMETRY"
+  schema_password: "oracle"
+  sys_password: "oracle"
+  host: "localhost"
+  port: 1521
+  service_name: "FREEPDB1"
+
+otlp:
+  endpoint_url: "http://otel-collector:4318"
+  service_name: "oracle-db-prod"
+  environment: "production"
+  timeout_ms: 5000
+
+queue:
+  max_size_mb: 500
+  force_rotation_hours: 24
+
+features:
+  debug_mode: false

@@ -1,0 +1,38 @@
+# =============================================================================
+# PLTelemetry — Installation Configuration Template
+# =============================================================================
+# Copy this file, fill in your values, and run: python install.py
+# =============================================================================
+
+connection:
+  # Target schema where PLTelemetry will be installed
+  schema: "PLTELEMETRY"
+  schema_password: ""        # Leave empty to be prompted
+  # SYS credentials (required for V$ view grants and ACLs)
+  sys_password: ""           # Leave empty to be prompted
+  # Database connection
+  host: "localhost"
+  port: 1521
+  service_name: "XEPDB1"
+
+# ---------------------------------------------------------------------------
+# OTLP Exporter Configuration
+# ---------------------------------------------------------------------------
+otlp:
+  endpoint_url: "http://otel-collector:4318"
+  service_name: "oracle-db-prod"
+  environment: "production"
+  timeout_ms: 5000
+
+# ---------------------------------------------------------------------------
+# Queue Configuration
+# ---------------------------------------------------------------------------
+queue:
+  max_size_mb: 500
+  force_rotation_hours: 24
+
+# ---------------------------------------------------------------------------
+# Feature Toggles
+# ---------------------------------------------------------------------------
+features:
+  debug_mode: false
