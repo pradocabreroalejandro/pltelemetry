@@ -8,7 +8,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
         p_key   IN VARCHAR2, 
         p_default IN VARCHAR2 DEFAULT NULL
     ) RETURN VARCHAR2 
-    RESULT_CACHE RELIES_ON (plt_sys_config) -- ¡La magia! Si la tabla cambia, la cache se limpia.
+    RESULT_CACHE RELIES_ON (plt_sys_config) -- The magic! If the table changes, the cache is cleared.
     IS
         l_val plt_sys_config.config_value%TYPE;
     BEGIN
@@ -23,12 +23,12 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
         WHEN NO_DATA_FOUND THEN
             RETURN p_default;
         WHEN OTHERS THEN
-            -- Fail-safe: Si falla la BD, devolvemos default sin explotar
+            -- Fail-safe: If DB fails, return default without exploding
             RETURN p_default;
     END get_param;
 
     -- =========================================================================
-    -- HELPERS DE TIPO
+    -- TYPE HELPERS
     -- =========================================================================
     
     FUNCTION get_bool_param(
@@ -61,7 +61,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
         
         RETURN TO_NUMBER(l_val);
     EXCEPTION WHEN OTHERS THEN
-        RETURN p_default; -- Si no es número, devolvemos default
+        RETURN p_default; -- If not a number, return default
     END;
 
     -- =========================================================================
@@ -74,7 +74,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
         p_value IN VARCHAR2,
         p_desc  IN VARCHAR2 DEFAULT NULL
     ) IS
-        PRAGMA AUTONOMOUS_TRANSACTION; -- Para no afectar la txn principal
+        PRAGMA AUTONOMOUS_TRANSACTION; -- To not affect the main txn
     BEGIN
         MERGE INTO plt_sys_config t
         USING (SELECT p_group as g, p_key as k FROM dual) s
@@ -84,7 +84,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
                 config_value = p_value,
                 updated_at   = SYSTIMESTAMP,
                 updated_by   = USER,
-                description  = NVL(p_desc, description) -- Actualiza desc solo si se pasa
+                description  = NVL(p_desc, description) -- Update desc only if passed
         WHEN NOT MATCHED THEN
             INSERT (config_group, config_key, config_value, description)
             VALUES (p_group, p_key, p_value, NVL(p_desc, 'Auto-generated param'));
@@ -92,9 +92,8 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
         COMMIT;
     EXCEPTION WHEN OTHERS THEN
         ROLLBACK;
-        RAISE_APPLICATION_ERROR(-20005, 'Error actualizando config: ' || 
+        RAISE_APPLICATION_ERROR(-20005, 'Error updating config: ' || 
             DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
     END set_param;
 
 END PLT_CONFIGURATION;
-/

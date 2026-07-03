@@ -3,7 +3,7 @@ auth_enabled: false
 server:
   http_listen_port: 3100
   grpc_listen_port: 9096
-  # 🔥 Aumentamos timeouts para peticiones pesadas
+  # 🔥 Increased timeouts for heavy requests
   http_server_read_timeout: 1m
   http_server_write_timeout: 1m
   grpc_server_max_recv_msg_size: 52428800 # 50MB
@@ -31,7 +31,7 @@ schema_config:
         prefix: index_
         period: 24h
 
-# Configuración de Compactor (Correcta, la mantenemos)
+# Compactor Configuration (Correct, we keep it)
 compactor:
   working_directory: /loki/boltdb-shipper-compactor
   compaction_interval: 10m
@@ -40,24 +40,24 @@ compactor:
   retention_delete_worker_count: 150
   delete_request_store: filesystem
 
-# 🔥 LÍMITES TUNEADOS PARA STRESS TEST 🔥
+# 🔥 TUNED LIMITS FOR STRESS TEST 🔥
 limits_config:
-  # Retención (Correcto)
+  # Retention (Correct)
   retention_period: 720h 
   reject_old_samples: true
   reject_old_samples_max_age: 168h
   
-  # Compatibilidad (Correcto)
+  # Compatibility (Correct)
   allow_structured_metadata: false 
   
-  # 🚀 AQUÍ ESTÁ EL TURBO:
-  ingestion_rate_mb: 50           # Por defecto es 4MB. Subimos a 50MB/s
-  ingestion_burst_size_mb: 100    # Burst permitido hasta 100MB
+  # 🚀 HERE'S THE TURBO:
+  ingestion_rate_mb: 50           # Default is 4MB. Bumped to 50MB/s
+  ingestion_burst_size_mb: 100    # Burst allowed up to 100MB
   max_entries_limit_per_query: 50000
   per_stream_rate_limit: 50MB
   per_stream_rate_limit_burst: 100MB
   
-  # Para evitar errores con etiquetas largas en tests sintéticos
+  # To avoid errors with long labels in synthetic tests
   max_label_value_length: 2048 
   max_label_name_length: 1024
 

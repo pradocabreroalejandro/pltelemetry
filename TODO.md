@@ -1,22 +1,22 @@
 # TODO
 
-> Lista de tareas pendientes para PLTelemetry.
+> Pending tasks for PLTelemetry.
 
 ---
 
-## Pendientes
+## Pending
 
-- [ ] **Simplificar la API de telemetría en PL/SQL a 1 línea** — traza, log y métrica deberían poder emitirse idealmente con una sola llamada/procedimiento cada uno.
-- [ ] **Auto health-check del esquema PLTelemetry** — métricas internas para monitorizar el propio esquema: uso de tablespace, degradación en `plt_queue`, y otras condiciones de salud. Implementar en el CORE del paquete de métricas de BD o como una versión más ligera del mismo.
-- [ ] **Refactorizar y simplificar el código** — reducir complejidad sin perder funcionalidad siempre que sea posible.
-- [ ] **Migrar de Docker a Podman** — adaptar el `docker-compose.yml` y las configuraciones para que funcionen con Podman en lugar de Docker.
-## En progreso
+- [ ] **Simplify the PL/SQL telemetry API to 1 line** — trace, log, and metric should ideally be emitted with a single call/procedure each.
+- [ ] **Auto health-check of the PLTelemetry schema** — internal metrics to monitor the schema itself: tablespace usage, degradation in `plt_queue`, and other health conditions. Implement in the CORE of the DB metrics package or as a lighter version of it.
+- [ ] **Refactor and simplify the code** — reduce complexity without losing functionality whenever possible.
+- [ ] **Migrate from Docker to Podman** — adapt the `docker-compose.yml` and configurations to work with Podman instead of Docker.
+## In Progress
 
-- [ ] **Script de instalación a prueba de bombas** — crear un template YAML/CFG donde el usuario introduzca los datos necesarios (schemas, tablespaces, endpoints, etc.) y un script que lea ese fichero para realizar una instalación desatendida de PLTelemetry.
-- [ ] **Ansible minimalista para provisioning** — playbook para provisionar una VM Oracle Linux 9.6: leer config del usuario, conectar a la VM, crear usuario, instalar Podman, construir imágenes de WoofyMetrics y ejecutar la instalación de PLTelemetry.
-- [ ] **Generar releases oficiales de PLTelemetry** — versionado, empaquetado y publicación de releases estables del proyecto.
+- [ ] **Bulletproof installation script** — create a YAML/CFG template where the user enters the necessary data (schemas, tablespaces, endpoints, etc.) and a script that reads that file to perform an unattended installation of PLTelemetry.
+- [ ] **Minimalist Ansible for provisioning** — playbook to provision an Oracle Linux 9.6 VM: read user config, connect to the VM, create user, install Podman, build WoofyMetrics images, and run the PLTelemetry installation.
+- [ ] **Generate official PLTelemetry releases** — versioning, packaging, and publishing stable project releases.
 
 
-## Completadas
+## Completed
 
-- [x] *(mover aquí cuando se terminen)*
+- [x] *(move here when finished)*

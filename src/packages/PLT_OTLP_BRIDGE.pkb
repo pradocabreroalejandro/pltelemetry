@@ -1,22 +1,22 @@
 CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
     -- =========================================================================
-    -- ESTADO INTERNO
+    -- INTERNAL STATE
     -- =========================================================================
-    -- Ya no guardamos variables de paquete persistentes para config, 
-    -- confiamos en la RESULT CACHE de PLT_CONFIGURATION.
+    -- We no longer store persistent package variables for config, 
+    -- we trust PLT_CONFIGURATION's RESULT CACHE.
     g_cached_resource JSON_OBJECT_T;
     
-    -- Sobreescribe el log interno
+    -- Overrides internal log
     g_debug_override  BOOLEAN := NULL; 
 
     -- =========================================================================
-    -- UTILIDADES PRIVADAS
+    -- PRIVATE UTILITIES
     -- =========================================================================
 
     FUNCTION is_debug_enabled RETURN BOOLEAN IS
     BEGIN
-        -- Prioridad: 1. Override manual (set_debug), 2. Config BD
+        -- Priority: 1. Manual override (set_debug), 2. DB Config
         IF g_debug_override IS NOT NULL THEN RETURN g_debug_override; END IF;
         RETURN PLT_CONFIGURATION.get_bool_param('GENERAL', 'DEBUG_MODE', FALSE);
     END;
@@ -70,7 +70,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_res JSON_OBJECT_T;
         l_attrs JSON_ARRAY_T;
         
-        -- Leemos la configuración DENTRO de la función. Gracias a Result Cache es gratis.
+        -- We read the configuration INSIDE the function. Thanks to Result Cache it's free.
         l_svc_name VARCHAR2(100) := PLT_CONFIGURATION.get_param('OTLP', 'SERVICE_NAME', 'oracle-db');
         l_env      VARCHAR2(100) := PLT_CONFIGURATION.get_param('OTLP', 'ENVIRONMENT', 'prod');
         
@@ -83,8 +83,8 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
             l_attrs.append(l_kv);
         END;
     BEGIN
-        -- Cache simple en memoria de paquete para el objeto base, si no queremos reconstruirlo siempre
-        -- PERO como la config puede cambiar, mejor lo reconstruimos rápido.
+        -- Simple in-memory package cache for the base object, if we don't want to rebuild it always
+        -- BUT since config can change, better to rebuild it quickly.
         l_res := JSON_OBJECT_T();
         l_attrs := JSON_ARRAY_T();
 
@@ -99,13 +99,13 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     END;
 
     -- =========================================================================
-    -- HTTP SENDER (Ahora lee la URL de Config)
+    -- HTTP SENDER (Now reads the URL from Config)
     -- =========================================================================
     PROCEDURE send_http(p_path VARCHAR2, p_payload CLOB) IS
         l_req  UTL_HTTP.REQ;
         l_res  UTL_HTTP.RESP;
         
-        -- LEEMOS URL DE CONFIG
+        -- READ URL FROM CONFIG
         l_base_url VARCHAR2(500) := PLT_CONFIGURATION.get_param('OTLP', 'ENDPOINT_URL', 'http://localhost:4318');
         l_url      VARCHAR2(1000) := RTRIM(l_base_url, '/') || p_path;
         
@@ -137,7 +137,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     END;
 
     -- =========================================================================
-    -- TELEMETRY SENDERS (Sin cambios lógicos, solo usan las funcs de arriba)
+    -- TELEMETRY SENDERS (No logical changes, just use the functions above)
     -- =========================================================================
 
     PROCEDURE send_metric(p_src JSON_OBJECT_T) IS
@@ -219,7 +219,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         IF p_data.has('parent_span_id') THEN
             l_span.put('parentSpanId', p_data.get_String('parent_span_id'));
         END IF;
-        l_span.put('name', NVL(p_data.get_String('operation_name'), 'oracle-db-operation')); -- Corregido key
+        l_span.put('name', NVL(p_data.get_String('operation_name'), 'oracle-db-operation')); -- Fixed key
         l_span.put('kind', 1); 
         l_span.put('startTimeUnixNano', l_start_time);
         l_span.put('endTimeUnixNano', l_end_time);
@@ -282,18 +282,18 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     -- PUBLIC INTERFACE
     -- =========================================================================
 
-    -- Init ahora es "Legacy" o para overrides temporales, pero no es obligatorio llamarlo
-    -- para configurar la URL, ya que se lee de la tabla.
+    -- Init is now "Legacy" or for temporary overrides, but it's not mandatory to call it
+    -- to configure the URL, since it's read from the table.
     PROCEDURE init(
         p_otlp_endpoint VARCHAR2, 
         p_service_name  VARCHAR2 DEFAULT 'oracle-db',
         p_environment   VARCHAR2 DEFAULT 'production'
     ) IS
     BEGIN
-        -- Opcional: Podrías actualizar la tabla de config aquí si quisieras
-        -- O simplemente usar estos valores para sobreescribir la sesión actual.
-        -- Por simplicidad, y siguiendo tu deseo de "no hardcode", vamos a ignorar
-        -- los argumentos y loguear un aviso si alguien intenta usarlos.
+        -- Optional: You could update the config table here if you wanted
+        -- Or simply use these values to override the current session.
+        -- For simplicity, and following your desire for "no hardcode", we'll ignore
+        -- the arguments and log a warning if someone tries to use them.
         log_debug('WARN: init() parameters are ignored. Using PLT_SYS_CONFIG table values.');
     EXCEPTION
         WHEN OTHERS THEN log_debug('init fatal error '|| 
@@ -323,7 +323,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
             log_debug('Error processing payload: ' || 
                 SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
                        'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
-            RAISE; -- Re-lanzamos para que PLTelemetry lo marque como FAILED
+            RAISE; -- Re-raise so PLTelemetry marks it as FAILED
     END;
 
     PROCEDURE run_failover_processing IS
@@ -335,15 +335,14 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         IF l_is_alive THEN
             RETURN;
         ELSE
-            -- Si estamos en failover, forzamos debug on quizás?
+            -- If we are in failover, maybe force debug on?
             log_debug('FAILOVER: Processing queue via PL/SQL Bridge');
             PLTelemetry.process_queue(p_batch_size => l_batch_size);
         END IF;
     EXCEPTION WHEN OTHERS THEN
-        PLTelemetry.log('ERROR', 'Fallo en Failover: ' || 
+        PLTelemetry.log('ERROR', 'Failure in Failover: ' || 
             SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
                    'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
 END PLT_OTLP_BRIDGE;
-/

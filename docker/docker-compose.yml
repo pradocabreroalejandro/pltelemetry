@@ -4,7 +4,7 @@
 
 services:
   # ---------------------------------------------------------------------------
-  # 🕵️‍♀️ MONITORIZACIÓN DE DOCKER - Portainer
+  # 🕵️‍♀️ DOCKER MONITORING - Portainer
   # ---------------------------------------------------------------------------
   portainer:
     image: portainer/portainer-ce:latest
@@ -46,10 +46,10 @@ services:
       retries: 5
 
   # ---------------------------------------------------------------------------
-  # API REST - Oracle ORDS (Standalone con Jetty)
+  # REST API - Oracle ORDS (Standalone with Jetty)
   # ---------------------------------------------------------------------------
   ords:
-    # CAMBIO AQUÍ: Usamos la ruta completa al registro de Oracle
+    # CHANGE HERE: Use the full path to the Oracle registry
     image: container-registry.oracle.com/database/ords:latest
     container_name: plt-ords
     restart: unless-stopped
@@ -72,20 +72,20 @@ services:
       - ords-secrets:/etc/ords/secrets
 
   # ---------------------------------------------------------------------------
-  # CEREBRO - OpenTelemetry Collector
+  # BRAIN - OpenTelemetry Collector
   # ---------------------------------------------------------------------------
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     container_name: plt-otel-collector
     environment:
       - GOMAXPROCS=8
-    # IMPORTANTE: Mapeamos tu fichero otel-collector-config.yaml
+    # IMPORTANT: Map your otel-collector-config.yaml file
     command: ["--config=/etc/otel-collector-config.yaml"]
     volumes:
       - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
       - "4317:4317" # OTLP gRPC
-      - "4318:4318" # OTLP HTTP (Tu PL/SQL dispara aquí)
+      - "4318:4318" # OTLP HTTP (Your PL/SQL fires here)
       - "8888:8888" # Self metrics
       - "8889:8889" # Prometheus Exporter
       - "13133:13133" # Health check
@@ -99,7 +99,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # TRAZAS - Tempo
+  # TRACES - Tempo
   # ---------------------------------------------------------------------------
   tempo:
     image: grafana/tempo:latest
@@ -110,11 +110,11 @@ services:
       - tempo-data:/var/tempo
     ports:
       - "3200:3200" # API
-      - "4317"      # gRPC interno
+      - "4317"      # Internal gRPC
     networks:
       - pltelemetry-network
     restart: unless-stopped
-    user: "0" # Permisos root para escribir en volumen
+    user: "0" # Root permissions to write to volume
 
   # ---------------------------------------------------------------------------
   # LOGS - Loki
@@ -133,7 +133,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # MÉTRICAS - Prometheus
+  # METRICS - Prometheus
   # ---------------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:latest
@@ -156,7 +156,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # VISUALIZACIÓN - Grafana
+  # VISUALIZATION - Grafana
   # ---------------------------------------------------------------------------
   grafana:
     image: grafana/grafana:latest
@@ -165,7 +165,7 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
-      # Correo (MailHog)
+      # Email (MailHog)
       - GF_SMTP_ENABLED=true
       - GF_SMTP_HOST=mailhog:1025
       - GF_SMTP_SKIP_VERIFY=true
@@ -173,7 +173,7 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
     ports:
-      - "3020:3000" # Grafana en puerto 3020
+      - "3020:3000" # Grafana on port 3020
     depends_on:
       - tempo
       - loki
@@ -200,15 +200,15 @@ services:
 # VOLUMES & NETWORKS
 # =============================================================================
 volumes:
-  # Portainer (Nuevo - Automático)
+  # Portainer (New - Automatic)
   portainer_data:
 
-  # Base de Datos (Manual)
+  # Database (Manual)
   oracle-data:
     external: true
     name: docker_compose_oracle-data 
 
-  # Observabilidad (Manuales)
+  # Observability (Manual)
   grafana-data:
     external: true
     name: docker_compose_grafana-data
@@ -225,7 +225,7 @@ volumes:
     external: true
     name: docker_compose_tempo-data
 
-  # ORDS (Nuevos - Automáticos para guardar la config de Jetty/ORDS)
+  # ORDS (New - Automatic to save Jetty/ORDS config)
   ords-config:
   ords-secrets:
 

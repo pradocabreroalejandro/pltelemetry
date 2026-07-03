@@ -20,7 +20,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
     g_tenant_id     VARCHAR2(100) := 'default'; 
     g_session_id    VARCHAR2(32);
     
-    -- Variables para W3C Injection
+    -- Variables for W3C Injection
     g_current_trace_id   VARCHAR2(32); 
     g_external_parent_id VARCHAR2(16);
 
@@ -51,26 +51,26 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
     END;
 
     -- =========================================================================
-    -- [NUEVO] AUTO-DETECCIÓN DE CONTEXTO (Versión UTL_CALL_STACK Correcta)
+    -- [NEW] AUTO-DETECTION OF CONTEXT (Correct UTL_CALL_STACK Version)
     -- =========================================================================
     FUNCTION auto_detect_context RETURN VARCHAR2 IS
         l_depth      PLS_INTEGER;
         l_unit_name  VARCHAR2(4000);
     BEGIN
-        -- 1. Obtenemos profundidad
+        -- 1. Get depth
         l_depth := UTL_CALL_STACK.DYNAMIC_DEPTH; 
 
-        -- 2. Recorremos hacia arriba
+        -- 2. Walk up the stack
         FOR i IN 2 .. l_depth LOOP
             
-            -- Obtenemos el nombre cualificado (ESQUEMA.PAQUETE.PROCEDIMIENTO)
+            -- Get the qualified name (SCHEMA.PACKAGE.PROCEDURE)
             l_unit_name := UTL_CALL_STACK.CONCATENATE_SUBPROGRAM(UTL_CALL_STACK.SUBPROGRAM(i));
             
-            -- FILTRO: Ignorar al propio paquete
+            -- FILTER: Ignore the package itself
             IF l_unit_name IS NOT NULL AND UPPER(l_unit_name) NOT LIKE '%PLTELEMETRY%' THEN
                 
-                -- ¡DEVUELVE SOLO EL NOMBRE! (Sin línea de código)
-                -- Esto facilita las reglas de activación exactas
+                -- RETURNS ONLY THE NAME! (Without code line)
+                -- This makes exact activation rules easier
                 RETURN l_unit_name;
                 
             END IF;
@@ -83,7 +83,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             RETURN 'UNKNOWN_CONTEXT';
     END;
 
-    -- INTERNAL ERROR LOGGER (Captura Stack automáticamente)
+    -- INTERNAL ERROR LOGGER (Captures Stack automatically)
     PROCEDURE log_internal_error(p_msg VARCHAR2) IS
         PRAGMA AUTONOMOUS_TRANSACTION;
         l_full_msg VARCHAR2(4000); 
@@ -96,7 +96,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             l_span_id  := g_span_stack(g_stack_ptr).span_id;
         END IF;
 
-        -- AQUÍ CAPTURAMOS EL STACK (Sustituye al SQLERRM)
+        -- HERE WE CAPTURE THE STACK (Replaces SQLERRM)
         l_full_msg := SUBSTR(
             p_msg || CHR(10) || 
             'Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
@@ -178,17 +178,17 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         l_op_name VARCHAR2(1000);
         l_should  BOOLEAN;
     BEGIN
-        -- 1. Auto-detección
+        -- 1. Auto-detection
         IF p_operation IS NULL THEN l_op_name := auto_detect_context(); ELSE l_op_name := p_operation; END IF;
 
-        -- 2. VERIFICAR ACTIVACIÓN
+        -- 2. VERIFY ACTIVATION
         IF (g_current_trace_id IS NOT NULL AND g_external_parent_id IS NOT NULL) OR p_force_trace THEN
             l_should := TRUE; 
         ELSE
             l_should := PLT_ACTIVATION_MANAGER.should_trace(l_op_name);
         END IF;
 
-        -- GESTIÓN DEL "NO" (Span Fantasma)
+        -- HANDLING THE "NO" (Ghost Span)
         IF NOT l_should THEN
             l_ctx.span_id := 'DISABLED'; 
             g_stack_ptr := g_stack_ptr + 1;
@@ -196,7 +196,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             RETURN NULL; 
         END IF;
 
-        -- Lógica Normal
+        -- Normal Logic
         IF g_session_id IS NULL THEN g_session_id := generate_hex_id(16); END IF;
 
         l_ctx.operation  := SUBSTR(l_op_name, 1, 900); 
@@ -222,7 +222,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         DBMS_APPLICATION_INFO.SET_ACTION('SPAN:' || SUBSTR(l_ctx.operation, 1, 30));
         RETURN l_ctx.span_id;
     EXCEPTION WHEN OTHERS THEN 
-        log_internal_error('start_span critical error'); -- Ya captura stack dentro
+        log_internal_error('start_span critical error'); -- Already captures stack internally
         RETURN NULL;
     END;
 
@@ -276,7 +276,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         END IF;
 
     EXCEPTION WHEN OTHERS THEN 
-        log_internal_error('end_span error'); -- Ya captura stack dentro
+        log_internal_error('end_span error'); -- Already captures stack internally
     END;
 
     -- LOG METRIC
@@ -324,7 +324,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
 
         enqueue('METRIC', l_json_obj.to_clob());
     EXCEPTION WHEN OTHERS THEN 
-        log_internal_error('log_metric error'); -- Ya captura stack dentro
+        log_internal_error('log_metric error'); -- Already captures stack internally
     END log_metric;
 
     -- LOG
@@ -368,10 +368,10 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         
         enqueue('LOG', l_json_obj.to_clob());
     EXCEPTION WHEN OTHERS THEN 
-        log_internal_error('log error'); -- Ya captura stack dentro
+        log_internal_error('log error'); -- Already captures stack internally
     END;
 
-    -- PROCESS QUEUE (CORREGIDO - Sin SQLERRM en UPDATE)
+    -- PROCESS QUEUE (FIXED - No SQLERRM in UPDATE)
     PROCEDURE process_queue(p_batch_size NUMBER DEFAULT 50) IS
         CURSOR c_pending IS
             SELECT id, item_type, payload
@@ -380,7 +380,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             ORDER BY id ASC
             FETCH FIRST p_batch_size ROWS ONLY;
         
-        l_err_msg  VARCHAR2(4000); -- Variable auxiliar para el error
+        l_err_msg  VARCHAR2(4000); -- Auxiliary variable for the error
     BEGIN
         PLT_OTLP_BRIDGE.init(NULL, NULL, NULL); 
         log_debug('process_queue() init executed');
@@ -396,7 +396,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
                 WHERE id = r.id;
                 
             EXCEPTION WHEN OTHERS THEN
-                -- Capturamos el stack en variable local antes de usarlo en SQL
+                -- Capture the stack in a local variable before using it in SQL
                 l_err_msg := SUBSTR(
                     'Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
                     'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 
@@ -421,7 +421,7 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
         l_mode      VARCHAR2(20);
         l_last_beat TIMESTAMP WITH TIME ZONE;
         l_seconds   NUMBER;
-        l_threshold CONSTANT NUMBER := 45; -- Sincronizado con tu monitor
+        l_threshold CONSTANT NUMBER := 45; -- Synced with your monitor
     BEGIN
         BEGIN
             SELECT pulse_mode, last_heartbeat 
@@ -430,14 +430,14 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
              WHERE agent_id = 'PRIMARY_AGENT' 
              FETCH FIRST 1 ROWS ONLY;
              
-            -- Cálculo de diferencia en segundos (robusto)
+            -- Robust difference calculation in seconds
             l_seconds := EXTRACT(DAY FROM (SYSTIMESTAMP - l_last_beat)) * 86400 +
                          EXTRACT(HOUR FROM (SYSTIMESTAMP - l_last_beat)) * 3600 +
                          EXTRACT(MINUTE FROM (SYSTIMESTAMP - l_last_beat)) * 60 +
                          EXTRACT(SECOND FROM (SYSTIMESTAMP - l_last_beat));
                        
             IF l_seconds > l_threshold THEN
-                -- Está muerto, Jim.
+                -- It's dead, Jim.
                 RETURN FALSE; 
             END IF;
 
@@ -448,11 +448,10 @@ CREATE OR REPLACE PACKAGE BODY PLTelemetry AS
             RETURN TRUE;
             
         EXCEPTION WHEN NO_DATA_FOUND THEN
-            -- Si nunca ha habido agente, asumimos que estamos en modo 'SOLO PLSQL' o arranque
-            RETURN FALSE; -- Cambiado a FALSE por seguridad: si no hay agente, que procese el PLSQL.
+            -- If there has never been an agent, assume we are in 'PLSQL ONLY' mode or startup
+            RETURN FALSE; -- Changed to FALSE for safety: if no agent, let PLSQL process.
         END;
     END;
 
 
 END PLTelemetry;
-/

@@ -1,6 +1,6 @@
 CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
 
-    -- Helper para construir JSON simple de tags
+    -- Helper to build simple JSON tags
     FUNCTION tag(k VARCHAR2, v VARCHAR2) RETURN VARCHAR2 IS
     BEGIN
         RETURN '{"' || k || '":"' || v || '"}';
@@ -13,7 +13,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         l_row t_plt_metric_row;
     BEGIN
         -- ---------------------------------------------------------------------
-        -- A. MÉTRICAS DE CPU Y HOST (Desde V$OSSTAT)
+        -- A. CPU AND HOST METRICS (From V$OSSTAT)
         -- ---------------------------------------------------------------------
         FOR r IN (
             SELECT stat_name, value 
@@ -28,13 +28,13 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         END LOOP;
 
         -- ---------------------------------------------------------------------
-        -- B. CONTADORES REALES (V$SYSSTAT)
+        -- B. REAL COUNTERS (V$SYSSTAT)
         -- ---------------------------------------------------------------------
         FOR r IN (
             SELECT name, value 
             FROM v$sysstat 
             WHERE name IN (
-                -- Transaccional
+                -- Transactional
                 'user commits',
                 'user rollbacks',
                 'logons cumulative',
@@ -47,7 +47,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'physical write IO requests',
                 'redo size',
                 
-                -- Cache & Memoria
+                -- Cache & Memory
                 'session logical reads',
                 'db block gets',
                 'consistent gets',
@@ -57,7 +57,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'sorts (memory)',
                 'sorts (disk)',
                 
-                -- Red
+                -- Network
                 'bytes sent via SQL*Net to client',
                 'bytes received via SQL*Net from client',
                 
@@ -66,7 +66,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'CPU used by this session'
             )
         ) LOOP
-            -- Mapeo a nombres estandarizados (Snake Case) y limpieza de paréntesis
+            -- Map to standardized names (Snake Case) and clean parentheses
             PIPE ROW(t_plt_metric_row(
                 'oracle_' || REPLACE(REPLACE(REPLACE(LOWER(r.name), ' ', '_'), '*', ''), '(', ''),
                 r.value, 
@@ -76,14 +76,14 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         END LOOP;
         
         -- ---------------------------------------------------------------------
-        -- C. MÉTRICAS DE ESTADO (GAUGES Calculados al momento)
+        -- C. STATE METRICS (GAUGES Calculated on the fly)
         -- ---------------------------------------------------------------------
         -- Sessions Current
         FOR r IN (SELECT COUNT(*) cnt FROM v$session) LOOP
             PIPE ROW(t_plt_metric_row('oracle_session_count_current', r.cnt, 'GAUGE', NULL));
         END LOOP;
         
-        -- Procesos Current
+        -- Processes Current
         FOR r IN (SELECT COUNT(*) cnt FROM v$process) LOOP
             PIPE ROW(t_plt_metric_row('oracle_process_count_current', r.cnt, 'GAUGE', NULL));
         END LOOP;
@@ -97,17 +97,17 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
     ----------------------------------------------------------------------------
     FUNCTION get_session_metrics RETURN t_plt_metric_tab PIPELINED IS
     BEGIN
-        -- Sesiones Activas
+        -- Active Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE type='USER' AND status='ACTIVE') LOOP
             PIPE ROW(t_plt_metric_row('oracle_sessions_active', r.cnt, 'GAUGE', NULL));
         END LOOP;
 
-        -- Sesiones Bloqueadas
+        -- Blocked Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE blocking_session IS NOT NULL) LOOP
             PIPE ROW(t_plt_metric_row('oracle_sessions_blocked', r.cnt, 'GAUGE', NULL));
         END LOOP;
 
-        -- Utilización de Procesos (%)
+        -- Process Utilization (%)
         FOR r IN (SELECT current_utilization, limit_value FROM v$resource_limit WHERE resource_name = 'processes') LOOP
              IF r.limit_value != 'UNLIMITED' THEN
                 PIPE ROW(t_plt_metric_row('oracle_process_utilization_percent', 
@@ -120,11 +120,11 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
     END;
 
     ----------------------------------------------------------------------------
-    -- 3. STORAGE METRICS (Iterador)
+    -- 3. STORAGE METRICS (Iterator)
     ----------------------------------------------------------------------------
     FUNCTION get_storage_metrics RETURN t_plt_metric_tab PIPELINED IS
     BEGIN
-        -- Itera sobre TODOS los tablespaces
+        -- Iterates over ALL tablespaces
         FOR r IN (
             SELECT tablespace_name, used_percent 
             FROM dba_tablespace_usage_metrics
@@ -141,4 +141,3 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
     END;
 
 END PLT_DB_METRIC_READER;
-/

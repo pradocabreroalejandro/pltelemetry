@@ -1,7 +1,7 @@
 -- src/data/01_default_config.sql
 PROMPT [DATA] Seeding default configuration...
 
--- Limpiamos primero para evitar duplicados si se corre varias veces
+-- Clean up first to avoid duplicates if run multiple times
 DELETE FROM plt_pulse_throttling_config;
 
 INSERT INTO plt_pulse_throttling_config 
@@ -27,9 +27,9 @@ VALUES ('COMA',   0.00, 0.00, 60.00, 0.00, 'N', 'System Overload - Hibernation')
 COMMIT;
 PROMPT Default configuration loaded.
 
--- DATOS INICIALES (Ejemplos)
--- 1. Por defecto, TODO apagado (Seguridad por diseño)
--- Usamos MERGE para evitar ORA-00001 si ya existe (idempotente)
+-- INITIAL DATA (Examples)
+-- 1. By default, EVERYTHING off (Security by design)
+-- Use MERGE to avoid ORA-00001 if already exists (idempotent)
 MERGE INTO plt_activation_rules t
 USING (SELECT '*' AS pattern, 'N' AS enabled, 0 AS rate FROM DUAL) s
 ON (t.object_pattern = s.pattern)

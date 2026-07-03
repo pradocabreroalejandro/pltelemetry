@@ -3,7 +3,7 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:4317
-        max_recv_msg_size_mib: 100 # 🔥 Subimos a 100MB por si acaso
+        max_recv_msg_size_mib: 100 # 🔥 Bumped to 100MB just in case
       http:
         endpoint: 0.0.0.0:4318
         max_request_body_size: 104857600 # 🔥 100MB
@@ -28,16 +28,16 @@ receivers:
             - targets: ['localhost:8888']
 
 processors:
-  # Memory limiter un poco más agresivo para proteger al collector
+  # Memory limiter a bit more aggressive to protect the collector
   memory_limiter:
     limit_mib: 1500
     spike_limit_mib: 500
     check_interval: 5s
 
-  # Batch processor: "Más vale muchos viajes pequeños que uno grande y volcar el camión"
+  # Batch processor: "Better many small trips than one big one and tip the truck over"
   batch:
-    timeout: 2s             # Esperamos más
-    send_batch_size: 2000   # Lotes medianos (no 5000, probemos con 2000)
+    timeout: 2s             # Wait longer
+    send_batch_size: 2000   # Medium batches (not 5000, let's try 2000)
     send_batch_max_size: 2000
 
   resource:
@@ -58,11 +58,11 @@ exporters:
       enabled: true
       initial_interval: 1s
       max_interval: 10s
-      max_elapsed_time: 60s # Más paciencia
+      max_elapsed_time: 60s # More patience
 
   loki:
     endpoint: http://loki:3100/loki/api/v1/push
-    # 🔥 Timeout explícito para Loki (vital si Loki va lento)
+    # 🔥 Explicit timeout for Loki (vital if Loki is slow)
     timeout: 10s 
 
   prometheus:

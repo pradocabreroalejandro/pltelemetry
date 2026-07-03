@@ -2,18 +2,18 @@ CREATE OR REPLACE PACKAGE PLT_QUEUE_MANAGER AS
     /**
      * PLT_QUEUE_MANAGER
      * -------------------------------------------------------------------------
-     * Orquestador de particionado lógico para PLT_QUEUE.
-     * Gestiona el ciclo de vida: ACTIVE -> DRAINING -> TRUNCATE -> READY
+     * Logical partitioning orchestrator for PLT_QUEUE.
+     * Manages the lifecycle: ACTIVE -> DRAINING -> TRUNCATE -> READY
      */
 
-    -- Mantiene el sistema: Verifica tamaños, rota si es necesario y trunca lo viejo.
-    -- Ideal para llamar desde un JOB cada 5-15 minutos.
+    -- Maintains the system: Checks sizes, rotates if necessary and truncates old data.
+    -- Ideal to call from a JOB every 5-15 minutes.
     PROCEDURE run_maintenance_cycle;
 
-    -- Fuerza una rotación manual (útil para despliegues o emergencias)
+    -- Forces a manual rotation (useful for deployments or emergencies)
     PROCEDURE force_rotation;
 
-    -- Devuelve información del estado actual (para monitoreo)
+    -- Returns current status information (for monitoring)
     PROCEDURE get_status(
         p_active_table OUT VARCHAR2,
         p_active_mb    OUT NUMBER,
@@ -24,4 +24,3 @@ CREATE OR REPLACE PACKAGE PLT_QUEUE_MANAGER AS
     FUNCTION get_table_size_mb(p_table_name VARCHAR2) RETURN NUMBER ;
 
 END PLT_QUEUE_MANAGER;
-/

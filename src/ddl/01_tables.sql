@@ -1,12 +1,12 @@
 -- =============================================================================
 -- 01_tables.sql
--- Definición del Esquema de Base de Datos (Topología Rotativa v2)
+-- Database Schema Definition (Rotating Topology v2)
 -- =============================================================================
 PROMPT [01] Creating Tables and Indexes...
 
--- CLEANUP (Ordenado por dependencias)
+-- CLEANUP (Ordered by dependencies)
 BEGIN
-    -- Borrado de objetos antiguos y nuevos
+    -- Cleanup of old and new objects
     FOR t IN (SELECT table_name FROM user_tables WHERE table_name IN (
         'PLT_SYS_CONFIG', 'PLT_METRIC_COLLECTORS', 'PLT_TENANTS', 
         'PLT_QUEUE', 'PLT_QUEUE_01', 'PLT_QUEUE_02', 'PLT_QUEUE_REGISTRY',
@@ -16,7 +16,7 @@ BEGIN
         EXECUTE IMMEDIATE 'DROP TABLE ' || t.table_name || ' CASCADE CONSTRAINTS';
     END LOOP;
 
-    -- Borrado de Vistas y Sinónimos de la topología
+    -- Cleanup of Views and Synonyms from the topology
     FOR v IN (SELECT view_name FROM user_views WHERE view_name = 'PLT_QUEUE_READER') LOOP
         EXECUTE IMMEDIATE 'DROP VIEW ' || v.view_name;
     END LOOP;
@@ -27,7 +27,7 @@ BEGIN
 END;
 /
 
--- 1. CONFIGURACIÓN DEL SISTEMA (La fuente de la verdad)
+-- 1. SYSTEM CONFIGURATION (The source of truth)
 CREATE TABLE plt_sys_config (
     config_group    VARCHAR2(50)  NOT NULL,
     config_key      VARCHAR2(100) NOT NULL,
@@ -39,18 +39,18 @@ CREATE TABLE plt_sys_config (
     CONSTRAINT pk_plt_sys_config PRIMARY KEY (config_group, config_key)
 );
 
--- 2. TOPOLOGÍA DE COLAS (Partitioning Lógico)
--- 2.1 Registro de Estado (El cerebro)
+-- 2. QUEUE TOPOLOGY (Logical Partitioning)
+-- 2.1 State Registry (The brain)
 CREATE TABLE plt_queue_registry (
     partition_name  VARCHAR2(30) PRIMARY KEY, -- 'PLT_QUEUE_01', 'PLT_QUEUE_02'
-    is_active       VARCHAR2(1) DEFAULT 'N',  -- 'Y' = Donde se hacen INSERTS
+    is_active       VARCHAR2(1) DEFAULT 'N',  -- 'Y' = Where INSERTS happen
     state           VARCHAR2(20),             -- 'ACTIVE', 'DRAINING', 'READY'
     last_truncate   TIMESTAMP WITH TIME ZONE,
     row_count_est   NUMBER,
     bytes_est       NUMBER
 );
 
--- 2.2 Tabla Física 01 (Activa por defecto)
+-- 2.2 Physical Table 01 (Active by default)
 CREATE TABLE plt_queue_01 (
     id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     item_type       VARCHAR2(20) NOT NULL CHECK (item_type IN ('TRACE', 'METRIC', 'LOG')),
@@ -65,7 +65,7 @@ CREATE TABLE plt_queue_01 (
 );
 CREATE INDEX idx_plt_queue_main_01 ON plt_queue_01(status, tenant_id, id); 
 
--- 2.3 Tabla Física 02 (Reserva por defecto)
+-- 2.3 Physical Table 02 (Reserve by default)
 CREATE TABLE plt_queue_02 (
     id              NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     item_type       VARCHAR2(20) NOT NULL CHECK (item_type IN ('TRACE', 'METRIC', 'LOG')),
@@ -80,14 +80,14 @@ CREATE TABLE plt_queue_02 (
 );
 CREATE INDEX idx_plt_queue_main_02 ON plt_queue_02(status, tenant_id, id); 
 
--- 2.4 Inicialización del Registro
+-- 2.4 Registry Initialization
 INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_01', 'Y', 'ACTIVE');
 INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_02', 'N', 'READY');
 
--- 2.5 Sinónimo de Escritura (Apunta a la activa)
+-- 2.5 Write Synonym (Points to the active one)
 CREATE OR REPLACE SYNONYM plt_queue_writer FOR plt_queue_01;
 
--- 2.6 Vista de Lectura (Unifica ambas para el Agente)
+-- 2.6 Read View (Unifies both for the Agent)
 CREATE OR REPLACE VIEW plt_queue_reader AS
 SELECT id, item_type, payload, status, retry_count, process_attempts, error_message, created_at, updated_at, tenant_id, 'PLT_QUEUE_01' as origin_table 
 FROM plt_queue_01
@@ -96,7 +96,7 @@ SELECT id, item_type, payload, status, retry_count, process_attempts, error_mess
 FROM plt_queue_02;
 
 
--- 3. REGISTRO DE AGENTES (Heartbeats)
+-- 3. AGENT REGISTRY (Heartbeats)
 CREATE TABLE plt_agent_registry (
     agent_id          VARCHAR2(100) DEFAULT 'PRIMARY' PRIMARY KEY,
     pulse_mode        VARCHAR2(20)  DEFAULT 'PULSE1',
@@ -110,7 +110,7 @@ CREATE TABLE plt_agent_registry (
     updated_at        TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP
 );
 
--- 4. CONFIGURACIÓN DE THROTTLING (Modos de Pulso)
+-- 4. THROTTLING CONFIGURATION (Pulse Modes)
 CREATE TABLE plt_pulse_throttling_config (
     pulse_mode          VARCHAR2(10),
     tenant_id           VARCHAR2(100) DEFAULT 'GLOBAL',
@@ -126,17 +126,17 @@ CREATE TABLE plt_pulse_throttling_config (
     CONSTRAINT pk_plt_pulse_config PRIMARY KEY (pulse_mode, tenant_id)
 );
 
--- 5. REGLAS DE ACTIVACIÓN (Sampling por objeto)
+-- 5. ACTIVATION RULES (Sampling per object)
 CREATE TABLE plt_activation_rules (
     rule_id         NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    object_pattern  VARCHAR2(100) NOT NULL, -- Ej: 'PAQUETE_VENTAS.%' o '*'
+    object_pattern  VARCHAR2(100) NOT NULL, -- E.g.: 'SALES_PACKAGE.%' or '*'
     is_enabled      VARCHAR2(1) DEFAULT 'Y' CHECK (is_enabled IN ('Y', 'N')),
     sample_rate     NUMBER DEFAULT 1.0 CHECK (sample_rate BETWEEN 0 AND 1),
     created_at      TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 CREATE UNIQUE INDEX idx_plt_rules_pattern ON plt_activation_rules(object_pattern);
 
--- 6. ERRORES INTERNOS (Self-Monitoring)
+-- 6. INTERNAL ERRORS (Self-Monitoring)
 CREATE TABLE plt_telemetry_errors (
     error_id      NUMBER GENERATED BY DEFAULT ON NULL AS IDENTITY PRIMARY KEY,
     error_time    TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
@@ -156,7 +156,7 @@ CREATE TABLE plt_tenants (
     created_at      TIMESTAMP DEFAULT SYSTIMESTAMP
 );
 
--- 8. COLECTORES DE MÉTRICAS
+-- 8. METRIC COLLECTORS
 CREATE TABLE plt_metric_collectors (
     collector_code      VARCHAR2(50) PRIMARY KEY,
     reader_package      VARCHAR2(128) DEFAULT 'PLT_DB_METRIC_READER' NOT NULL,
@@ -169,4 +169,5 @@ CREATE TABLE plt_metric_collectors (
 
 COMMIT;
 
-PROMPT ✅ Tablas y Topología Rotativa (v2) creadas correctamente.
+PROMPT ✅ Tables and Rotating Topology (v2) created successfully.
+

@@ -1,16 +1,15 @@
 CREATE OR REPLACE PACKAGE PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
     /*
-     * PAQUETE DE ORQUESTACIÓN
-     * -----------------------
-     * - Gestiona el bucle de ejecución.
-     * - Convierte filas PIPELINED en llamadas a PLTelemetry.
+     * ORCHESTRATION PACKAGE
+     * ---------------------
+     * - Manages the execution loop.
+     * - Converts PIPELINED rows into PLTelemetry calls.
      */
      
-    -- Procedimiento principal llamado por el Job del Scheduler
+    -- Main procedure called by the Scheduler Job
     PROCEDURE run_collection_cycle;
     
-    -- Fuerza la ejecución de un colector específico (útil para debug)
+    -- Forces execution of a specific collector (useful for debug)
     PROCEDURE run_collector_dynamic(p_code VARCHAR2, p_package VARCHAR2, p_func VARCHAR2);
 
 END PLT_DB_MONITOR_LOGIC;
-/

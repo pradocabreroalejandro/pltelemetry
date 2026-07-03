@@ -1,8 +1,8 @@
 CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
 
     ----------------------------------------------------------------------------
-    -- Private: Procesa el cursor. 
-    -- YA NO NECESITA p_tenant_id como parámetro, lo coge del ambiente.
+    -- Private: Processes the cursor. 
+    -- NO LONGER NEEDS p_tenant_id as a parameter, it takes it from the environment.
     ----------------------------------------------------------------------------
     PROCEDURE process_metrics(p_dataset t_plt_metric_tab) IS 
         l_attrs PLTelemetry.t_attributes;
@@ -14,7 +14,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         FOR i IN 1 .. p_dataset.COUNT LOOP
             l_attrs := CAST(NULL AS PLTelemetry.t_attributes);
             
-            -- Solo procesamos tags extra si la métrica los trae (ej: tablespace)
+            -- Only process extra tags if the metric brings them (e.g.: tablespace)
             IF p_dataset(i).tags_json IS NOT NULL THEN
                 BEGIN
                     l_json := JSON_OBJECT_T.parse(p_dataset(i).tags_json);
@@ -27,7 +27,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
                 END;
             END IF;
 
-            -- Llamada limpia
+            -- Clean call
             PLTelemetry.log_metric(
                 p_name  => p_dataset(i).metric_name,
                 p_value => p_dataset(i).metric_value,
@@ -38,7 +38,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
     END;
 
     ----------------------------------------------------------------------------
-    -- Ejecuta un colector (Simplificado)
+    -- Executes a collector (Simplified)
     ----------------------------------------------------------------------------
     PROCEDURE run_collector_dynamic(
         p_code      VARCHAR2, 
@@ -57,15 +57,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
             process_metrics(l_rows); 
         EXCEPTION 
             WHEN OTHERS THEN
-                -- CORREGIDO: Uso de Backtrace en lugar de SQLERRM
-                PLTelemetry.log('ERROR', 'Fallo en ' || p_code || ': ' || 
+                -- FIXED: Use Backtrace instead of SQLERRM
+                PLTelemetry.log('ERROR', 'Failure in ' || p_code || ': ' || 
                     SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
                            DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
         END;
     END;
 
     ----------------------------------------------------------------------------
-    -- Loop Principal (Donde gestionamos el Contexto)
+    -- Main Loop (Where we manage the Context)
     ----------------------------------------------------------------------------
     PROCEDURE run_collection_cycle IS
     BEGIN
@@ -78,7 +78,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         ) LOOP
             
             IF r.execution_scope = 'PER_TENANT' THEN
-                -- === MODO MULTI-TENANT ===
+                -- === MULTI-TENANT MODE ===
                 FOR t IN (SELECT tenant_id FROM plt_tenants WHERE is_enabled = 1) LOOP
                     
                     PLTelemetry.set_tenant(t.tenant_id);
@@ -87,12 +87,12 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
                 END LOOP;
                 
             ELSE
-                -- === MODO GLOBAL ===
+                -- === GLOBAL MODE ===
                 PLTelemetry.set_tenant('default');
                 run_collector_dynamic(r.collector_code, r.reader_package, r.reader_function);
             END IF;
 
-            -- Resetear contexto por seguridad al salir
+            -- Reset context for safety on exit
             PLTelemetry.set_tenant('default');
 
             UPDATE plt_metric_collectors 
@@ -105,10 +105,9 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
     EXCEPTION 
         WHEN OTHERS THEN
             ROLLBACK;
-            PLTelemetry.log('ERROR', 'Error critico en run_collection_cycle: ' || 
+            PLTelemetry.log('ERROR', 'Critical error in run_collection_cycle: ' || 
                 SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
                        DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
     END;
 
 END PLT_DB_MONITOR_LOGIC;
-/

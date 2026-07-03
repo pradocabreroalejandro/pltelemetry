@@ -1,10 +1,10 @@
 -- =============================================================================
 -- 00_types.sql
--- Definición de Tipos de Objetos SQL (UDTs)
+-- Object Type Definitions (UDTs)
 -- =============================================================================
 PROMPT [00] Creating Object Types...
 
--- Limpieza preventiva
+-- Preventive cleanup
 BEGIN
     EXECUTE IMMEDIATE 'DROP TYPE t_plt_metric_tab FORCE';
     EXECUTE IMMEDIATE 'DROP TYPE t_plt_metric_row FORCE';
@@ -12,7 +12,7 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL; END;
 /
 
--- 1. CONFIGURACIÓN DE PULSO (Usado para comunicar config al Agente Go)
+-- 1. PULSE CONFIGURATION (Used to communicate config to the Go Agent)
 CREATE OR REPLACE TYPE plt_pulse_config_t AS OBJECT (
     pulse_mode          VARCHAR2(10),
     capacity_multiplier NUMBER,
@@ -26,17 +26,18 @@ CREATE OR REPLACE TYPE plt_pulse_config_t AS OBJECT (
 );
 /
 
--- 2. FILA DE MÉTRICA (Usado en Pipelined Functions)
+-- 2. METRIC ROW (Used in Pipelined Functions)
 CREATE OR REPLACE TYPE t_plt_metric_row AS OBJECT (
     metric_name   VARCHAR2(255),
     metric_value  NUMBER,
-    metric_type   VARCHAR2(20),  -- 'GAUGE' o 'COUNTER'
-    tags_json     VARCHAR2(4000) -- Tags adicionales: '{"tablespace":"USERS"}'
+    metric_type   VARCHAR2(20),  -- 'GAUGE' or 'COUNTER'
+    tags_json     VARCHAR2(4000) -- Additional tags: '{"tablespace":"USERS"}'
 );
 /
 
--- 3. COLECCIÓN DE MÉTRICAS
+-- 3. METRIC COLLECTION
 CREATE OR REPLACE TYPE t_plt_metric_tab AS TABLE OF t_plt_metric_row;
 /
 
-PROMPT ✅ Tipos creados correctamente.
+PROMPT ✅ Types created successfully.
+

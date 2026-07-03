@@ -1,41 +1,41 @@
 DECLARE
-    -- Variable para capturar el error y el stack trace
+    -- Variable to capture the error and stack trace
     l_err_msg   VARCHAR2(4000);
     
-    -- CURSOR CORREGIDO:
-    -- 1. Quitamos 'ORDER BY' explícito (confiamos en el índice para FIFO).
-    -- 2. Usamos 'ROWNUM <= 50' en lugar de 'FETCH FIRST'.
-    -- Esto permite que FOR UPDATE SKIP LOCKED funcione sin vistas internas.
+    -- CORRECTED CURSOR:
+    -- 1. Removed explicit 'ORDER BY' (we trust the index for FIFO).
+    -- 2. Use 'ROWNUM <= 50' instead of 'FETCH FIRST'.
+    -- This allows FOR UPDATE SKIP LOCKED to work without internal views.
     CURSOR c_queue IS
         SELECT id, item_type, payload
         FROM plt_queue
         WHERE status = 'NEW'
-        AND ROWNUM <= 50 -- <--- EL CAMBIO CLAVE
+        AND ROWNUM <= 50 -- <--- THE KEY CHANGE
         FOR UPDATE SKIP LOCKED;
 BEGIN
-    -- 1. Inicializar Bridge (Ajusta la URL a tu Collector real)
+    -- 1. Initialize Bridge (Adjust the URL to your actual Collector)
     PLT_OTLP_BRIDGE.init(
         p_otlp_endpoint => 'http://otel-collector:4318', 
         p_service_name  => 'oracle-db-prod'
     );
-    -- Activar debug para ver qué pasa en la consola (opcional)
+    -- Enable debug to see what happens in the console (optional)
     PLT_OTLP_BRIDGE.set_debug(TRUE);
 
-    -- 2. Procesar lote
+    -- 2. Process batch
     FOR r IN c_queue LOOP
         BEGIN
-            -- Intentamos enviar
+            -- Try to send
             PLT_OTLP_BRIDGE.process_payload(r.item_type, r.payload);
             
-            -- Éxito: Borramos (Fire & Forget)
+            -- Success: Delete (Fire & Forget)
             DELETE FROM plt_queue WHERE id = r.id;
             
         EXCEPTION 
             WHEN OTHERS THEN
-                -- Captura robusta del error + traza
+                -- Robust error capture + trace
                 l_err_msg := SUBSTR(SQLERRM || CHR(10) || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000);
                 
-                -- Actualizamos estado a FAILED
+                -- Update status to FAILED
                 UPDATE plt_queue 
                 SET status = 'FAILED', 
                     error_message = l_err_msg,
@@ -46,7 +46,7 @@ BEGIN
     END LOOP;
     
     COMMIT;
-    DBMS_OUTPUT.PUT_LINE('✅ Lote procesado correctamente.');
+    DBMS_OUTPUT.PUT_LINE('✅ Batch processed successfully.');
 END;
 /
 
@@ -57,9 +57,9 @@ DECLARE
     l_trace_json CLOB;
     l_metric_json CLOB;
 BEGIN
-    -- 1. Inicializamos el puente (Apunta al collector interno de Docker)
-    -- OJO: Si ejecutas esto desde tu SQL Developer en tu PC, usa 'http://localhost:4318'
-    -- Si es desde dentro de Docker, sería el nombre del servicio. Asumo localhost por ahora.
+    -- 1. Initialize the bridge (Point to the internal Docker collector)
+    -- NOTE: If you run this from your SQL Developer on your PC, use 'http://localhost:4318'
+    -- If from inside Docker, it would be the service name. Assuming localhost for now.
     PLT_OTLP_BRIDGE.init(
         p_otlp_endpoint => 'http://otel-collector:4318',
         p_service_name  => 'oracle-db-test', 
@@ -68,14 +68,14 @@ BEGIN
     
     PLT_OTLP_BRIDGE.set_debug(TRUE);
 
-    -- 2. Enviamos una MÉTRICA (Un contador simple)
-    l_metric_json := '{"name": "test_contador_manual", "value": 1, "type": "COUNTER", "timestamp": "'||TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"')||'", "tenant_id": "tenant-1"}';
+    -- 2. Send a METRIC (A simple counter)
+    l_metric_json := '{"name": "test_manual_counter", "value": 1, "type": "COUNTER", "timestamp": "'||TO_CHAR(SYSTIMESTAMP, 'YYYY-MM-DD"T"HH24:MI:SS.FF6"Z"')||'", "tenant_id": "tenant-1"}';
     PLT_OTLP_BRIDGE.process_payload('METRIC', l_metric_json);
-    DBMS_OUTPUT.PUT_LINE('Métrica enviada.');
+    DBMS_OUTPUT.PUT_LINE('Metric sent.');
 
-    -- 3. Enviamos una TRAZA (Simulada)
-    -- Nota: No paso TraceId para que el paquete genere uno nuevo y me lo pinte en debug
-    l_trace_json := '{"name": "operacion_manual_sql", "tenant_id": "tenant-1"}';
+    -- 3. Send a TRACE (Simulated)
+    -- Note: Not passing TraceId so the package generates a new one and prints it in debug
+    l_trace_json := '{"name": "manual_sql_operation", "tenant_id": "tenant-1"}';
     PLT_OTLP_BRIDGE.process_payload('TRACE', l_trace_json);
     
     COMMIT;
@@ -87,7 +87,7 @@ SET SERVEROUTPUT ON;
 DECLARE
     l_metric_json CLOB;
 BEGIN
-    -- Inicializamos apuntando al collector
+    -- Initialize pointing to the collector
     PLT_OTLP_BRIDGE.init(
         p_otlp_endpoint => 'http://otel-collector:4318', 
         p_service_name  => 'oracle-db-test', 
@@ -96,10 +96,10 @@ BEGIN
     
     PLT_OTLP_BRIDGE.set_debug(TRUE);
 
-    -- ⚠️ TRUCO: No enviamos timestamp. Dejamos que el package calcule el UTC real.
-    -- Cambiamos el nombre para que sea fácil de buscar.
+    -- ⚠️ TRICK: Don't send timestamp. Let the package calculate the real UTC.
+    -- Change the name so it's easy to find.
     l_metric_json := '{
-        "name": "test_sin_fecha", 
+        "name": "test_without_date", 
         "value": 50, 
         "type": "COUNTER", 
         "tenant_id": "tenant-1"
@@ -107,7 +107,7 @@ BEGIN
     
     PLT_OTLP_BRIDGE.process_payload('METRIC', l_metric_json);
     
-    DBMS_OUTPUT.PUT_LINE('Métrica enviada sin fecha manual.');
+    DBMS_OUTPUT.PUT_LINE('Metric sent without manual date.');
     COMMIT;
 END;
 /
@@ -123,9 +123,9 @@ BEGIN
         p_environment   => 'dev'
     );
     
-    -- GAUGE: El tipo de métrica más sencillo (sin histórico, solo valor actual)
+    -- GAUGE: The simplest metric type (no history, just current value)
     l_metric_json := '{
-        "name": "oracle_gauge_prueba", 
+        "name": "oracle_gauge_test", 
         "value": 123.45, 
         "type": "GAUGE", 
         "tenant_id": "tenant-1"
@@ -133,7 +133,7 @@ BEGIN
     
     PLT_OTLP_BRIDGE.process_payload('METRIC', l_metric_json);
     
-    DBMS_OUTPUT.PUT_LINE('Métrica GAUGE enviada.');
+    DBMS_OUTPUT.PUT_LINE('GAUGE metric sent.');
     COMMIT;
 END;
 /

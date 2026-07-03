@@ -1,86 +1,86 @@
 SET SERVEROUTPUT ON;
 
 DECLARE
-    -- Variable para atributos
+    -- Variable for attributes
     l_attrs PLTelemetry.t_attributes;
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('📡 Iniciando prueba de logs V2 (Multi-Tenant)...');
+    DBMS_OUTPUT.PUT_LINE('📡 Starting V2 log test (Multi-Tenant)...');
 
-    -- [NUEVO] 1. Establecemos el contexto del Tenant
-    -- Esto es vital ahora. Todo lo que ocurra en esta sesión será de 'CLIENTE_DEMO'.
+    -- [NEW] 1. Set the Tenant context
+    -- This is vital now. Everything that happens in this session will belong to 'CLIENTE_DEMO'.
     PLTelemetry.set_tenant('CLIENTE_DEMO');
 
-    -- 2. Log simple (Hereda el tenant automáticamente)
+    -- 2. Simple log (Inherits the tenant automatically)
     PLTelemetry.log(
         p_level   => 'INFO', 
-        p_message => 'Sistema V2 arrancado correctamente'
+        p_message => 'V2 System started successfully'
     );
 
-    -- 3. Log con atributos
-    l_attrs(1).key := 'usuario';
+    -- 3. Log with attributes
+    l_attrs(1).key := 'user';
     l_attrs(1).value := 'ADMIN_TEST';
-    l_attrs(2).key := 'origen';
+    l_attrs(2).key := 'source';
     l_attrs(2).value := 'SQLDeveloper';
     
     PLTelemetry.log(
         p_level   => 'WARN', 
-        p_message => 'Prueba de atributos complejos',
+        p_message => 'Complex attributes test',
         p_attrs   => l_attrs
     );
 
-    -- 4. Cambio de contexto (Simulando otro proceso en la misma sesión)
-    PLTelemetry.set_tenant('OTRO_CLIENTE');
+    -- 4. Context switch (Simulating another process in the same session)
+    PLTelemetry.set_tenant('OTHER_CLIENT');
     PLTelemetry.log(
         p_level   => 'ERROR', 
-        p_message => 'Error simulado en otro contexto'
+        p_message => 'Simulated error in another context'
     );
 
-    DBMS_OUTPUT.PUT_LINE('✅ Logs enviados a la cola.');
+    DBMS_OUTPUT.PUT_LINE('✅ Logs sent to queue.');
     COMMIT; 
 EXCEPTION
     WHEN OTHERS THEN
-        DBMS_OUTPUT.PUT_LINE('❌ Error en el bloque de prueba: ' || SQLERRM);
+        DBMS_OUTPUT.PUT_LINE('❌ Error in test block: ' || SQLERRM);
 END;
 /
 
 SET SERVEROUTPUT ON;
 
 DECLARE
-    -- Variable "tonta" para capturar el retorno de la función start_span
+    -- Dummy variable to capture the return of the start_span function
     l_waste VARCHAR2(100); 
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('🏎️ Iniciando prueba de Trazas Anidadas...');
+    DBMS_OUTPUT.PUT_LINE('🏎️ Starting Nested Traces test...');
 
-    -- 1. Contexto del Cliente
-    PLTelemetry.set_tenant('CLIENTE_AMAZONIAS');
+    -- 1. Client Context
+    PLTelemetry.set_tenant('CLIENT_AMAZON');
 
-    -- 2. SPAN PADRE (Root)
-    -- CORRECCIÓN: Asignamos el resultado a l_waste
-    l_waste := PLTelemetry.start_span('procesar_pedido');
+    -- 2. PARENT SPAN (Root)
+    -- FIX: Assign the result to l_waste
+    l_waste := PLTelemetry.start_span('process_order');
     
-        PLTelemetry.log('INFO', 'Iniciando validaciones...');
+        PLTelemetry.log('INFO', 'Starting validations...');
 
-        -- 3. SPAN HIJO 1 (Nested)
-        l_waste := PLTelemetry.start_span('validar_stock');
+        -- 3. CHILD SPAN 1 (Nested)
+        l_waste := PLTelemetry.start_span('validate_stock');
             
-            PLTelemetry.log('DEBUG', 'Consultando almacén principal');
+            PLTelemetry.log('DEBUG', 'Querying main warehouse');
             
-            -- Cerramos HIJO 1
+            -- Close CHILD 1
             PLTelemetry.end_span('OK');
 
-        -- 4. SPAN HIJO 2 (Nested)
-        l_waste := PLTelemetry.start_span('procesar_pago');
+        -- 4. CHILD SPAN 2 (Nested)
+        l_waste := PLTelemetry.start_span('process_payment');
             
-            PLTelemetry.log('INFO', 'Conectando con pasarela de pago');
+            PLTelemetry.log('INFO', 'Connecting to payment gateway');
             
-            -- Cerramos HIJO 2
+            -- Close CHILD 2
             PLTelemetry.end_span('OK');
 
-    -- 5. Cerramos PADRE (Root)
-    PLTelemetry.end_span('OK', 'Pedido procesado correctamente');
+    -- 5. Close PARENT (Root)
+    PLTelemetry.end_span('OK', 'Order processed successfully');
 
     COMMIT;
-    DBMS_OUTPUT.PUT_LINE('🏁 Prueba de trazas finalizada.');
+    DBMS_OUTPUT.PUT_LINE('🏁 Trace test completed.');
 EXCEPTION
     WHEN OTHERS THEN
         DBMS_OUTPUT.PUT_LINE('❌ Error: ' || SQLERRM);
@@ -91,12 +91,12 @@ END;
 SET SERVEROUTPUT ON;
 
 BEGIN
-    DBMS_OUTPUT.PUT_LINE('📏 Iniciando prueba de Métricas Tipadas...');
-    PLTelemetry.set_tenant('CLIENTE_TIPOS');
+    DBMS_OUTPUT.PUT_LINE('📏 Starting Typed Metrics test...');
+    PLTelemetry.set_tenant('CLIENT_TYPES');
 
-    -- 1. GAUGE (Valor absoluto)
-    -- Ejemplo: Espacio ocupado en un tablespace (puede subir y bajar)
-    -- Usamos la constante del paquete para evitar strings mágicos
+    -- 1. GAUGE (Absolute value)
+    -- Example: Space used in a tablespace (can go up and down)
+    -- Use the package constant to avoid magic strings
     PLTelemetry.log_metric(
         p_name  => 'db.tablespace.used_pct', 
         p_value => 85.5, 
@@ -104,8 +104,8 @@ BEGIN
         p_unit  => '%'
     );
 
-    -- 2. COUNTER (Acumulativo/Delta)
-    -- Ejemplo: Hemos procesado 1 pedido nuevo (suma 1 al total)
+    -- 2. COUNTER (Cumulative/Delta)
+    -- Example: We processed 1 new order (adds 1 to the total)
     PLTelemetry.log_metric(
         p_name  => 'app.orders.processed', 
         p_value => 1, 
@@ -114,6 +114,6 @@ BEGIN
     );
 
     COMMIT;
-    DBMS_OUTPUT.PUT_LINE('✅ Métricas tipadas enviadas.');
+    DBMS_OUTPUT.PUT_LINE('✅ Typed metrics sent.');
 END;
 /

@@ -2,12 +2,12 @@ CREATE OR REPLACE PACKAGE PLT_CONFIGURATION AS
     /**
      * PLT_CONFIGURATION
      * -------------------------------------------------------------------------
-     * Gestor centralizado de configuración.
-     * Lee de PLT_SYS_CONFIG y usa RESULT_CACHE para máximo rendimiento.
+     * Centralized configuration manager.
+     * Reads from PLT_SYS_CONFIG and uses RESULT_CACHE for maximum performance.
      */
 
-    -- Obtiene un valor de configuración (String)
-    -- Usa RESULT_CACHE: Si la tabla no cambia, no hacemos SELECT.
+    -- Gets a configuration value (String)
+    -- Uses RESULT_CACHE: If the table doesn't change, we don't SELECT.
     FUNCTION get_param(
         p_group IN VARCHAR2, 
         p_key   IN VARCHAR2, 
@@ -15,22 +15,22 @@ CREATE OR REPLACE PACKAGE PLT_CONFIGURATION AS
     ) RETURN VARCHAR2 
     RESULT_CACHE;
 
-    -- Helper para obtener valores booleanos (TRUE/FALSE)
+    -- Helper to get boolean values (TRUE/FALSE)
     FUNCTION get_bool_param(
         p_group IN VARCHAR2, 
         p_key   IN VARCHAR2, 
         p_default IN BOOLEAN DEFAULT FALSE
     ) RETURN BOOLEAN;
 
-    -- Helper para obtener valores numéricos
+    -- Helper to get numeric values
     FUNCTION get_num_param(
         p_group IN VARCHAR2, 
         p_key   IN VARCHAR2, 
         p_default IN NUMBER DEFAULT 0
     ) RETURN NUMBER;
 
-    -- Actualiza o Inserta un valor de configuración
-    -- Al hacer commit, la caché de resultados se invalida automáticamente.
+    -- Updates or Inserts a configuration value
+    -- On commit, the result cache is automatically invalidated.
     PROCEDURE set_param(
         p_group IN VARCHAR2, 
         p_key   IN VARCHAR2, 
@@ -39,4 +39,3 @@ CREATE OR REPLACE PACKAGE PLT_CONFIGURATION AS
     );
 
 END PLT_CONFIGURATION;
-/

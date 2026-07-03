@@ -17,9 +17,9 @@ create or replace package pltelemetry authid definer as
    type t_attributes is
       table of t_attribute index by binary_integer;
 
-    -- Tipos de Métricas (Para no equivocarse)
-   c_metric_gauge constant varchar2(10) := 'GAUGE';   -- Valores absolutos (Temp, CPU)
-   c_metric_counter constant varchar2(10) := 'COUNTER'; -- Sumatorios (Ventas, Errores)
+    -- Metric Types (To avoid mistakes)
+   c_metric_gauge constant varchar2(10) := 'GAUGE';   -- Absolute values (Temp, CPU)
+   c_metric_counter constant varchar2(10) := 'COUNTER'; -- Cumulative sums (Sales, Errors)
 
     --------------------------------------------------------------------------
     -- SPAN MANAGEMENT
@@ -119,4 +119,3 @@ create or replace package pltelemetry authid definer as
    g_debug         BOOLEAN := FALSE;
 
 end pltelemetry;
-/

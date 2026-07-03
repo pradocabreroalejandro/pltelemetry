@@ -1,12 +1,12 @@
 -- =============================================================================
 -- 04_jobs.sql
--- Definición de Jobs del Scheduler
+-- Scheduler Job Definitions
 -- =============================================================================
 PROMPT [04] Creating Scheduler Jobs...
 
 begin
-    -- 1. JOB DE FAILOVER (Envío vía PL/SQL si el Agente muere)
-    -- Corre cada minuto para verificar salud y procesar si es necesario.
+    -- 1. FAILOVER JOB (Send via PL/SQL if the Agent dies)
+    -- Runs every minute to check health and process if necessary.
    begin
       dbms_scheduler.drop_job('PLT_FAILOVER_JOB');
    exception
@@ -19,12 +19,12 @@ begin
       job_action      => 'BEGIN PLT_OTLP_BRIDGE.run_failover_processing; END;',
       start_date      => systimestamp,
       repeat_interval => 'FREQ=MINUTELY; INTERVAL=1',
-      enabled         => true, -- Se habilita por defecto, el SP decide si hace algo o no
-      comments        => 'Vigilante: Procesa la cola vía UTL_HTTP si el Agente Go muere'
+      enabled         => true, -- Enabled by default, the SP decides whether to do something or not
+      comments        => 'Watchdog: Processes the queue via UTL_HTTP if the Go Agent dies'
    );
 
-    -- 2. JOB DE MÉTRICAS (El "Ticker")
-    -- Corre cada 10 segundos para evaluar colectores
+    -- 2. METRICS JOB (The "Ticker")
+    -- Runs every 10 seconds to evaluate collectors
    begin
       dbms_scheduler.drop_job('PLT_METRIC_TICKER_JOB');
    exception
@@ -38,13 +38,13 @@ begin
       start_date      => systimestamp,
       repeat_interval => 'FREQ=SECONDLY; INTERVAL=10',
       enabled         => true,
-      comments        => 'Metronomo: Dispara recolectores de metricas'
+      comments        => 'Metronome: Fires metric collectors'
    );
     
-    -- NOTA: El JOB_PUSH_TELEMETRY original (loop de envío) NO lo creo aquí,
-    -- porque asumo que el AGENTE GO es el encargado principal de vaciar la cola.
-    -- El PLT_FAILOVER_JOB es el respaldo.
-    -- Si no vas a usar Agente Go y quieres solo PL/SQL, descomenta lo siguiente:
+    -- NOTE: The original JOB_PUSH_TELEMETRY (send loop) is NOT created here,
+    -- because I assume the GO AGENT is the main responsible for emptying the queue.
+    -- PLT_FAILOVER_JOB is the backup.
+    -- If you won't use the Go Agent and want only PL/SQL, uncomment the following:
     /*
     DBMS_SCHEDULER.CREATE_JOB (
         job_name        => 'JOB_PUSH_TELEMETRY_SOLO',
@@ -60,15 +60,15 @@ begin
     
         DBMS_SCHEDULER.CREATE_JOB (
             job_name        => 'PLT_DB_MONITOR_JOB',
-            job_type        => 'PLSQL_BLOCK', -- Usamos PLSQL_BLOCK para mayor flexibilidad
+            job_type        => 'PLSQL_BLOCK', -- Use PLSQL_BLOCK for greater flexibility
             job_action      => 'BEGIN PLT_DB_MONITOR_LOGIC.run_collection_cycle; END;',
             start_date      => SYSTIMESTAMP,
-            repeat_interval => 'FREQ=SECONDLY; INTERVAL=10', -- Ejecutar cada 10 segundos
+            repeat_interval => 'FREQ=SECONDLY; INTERVAL=10', -- Run every 10 seconds
             enabled         => TRUE,
-            comments        => 'Lanza el ciclo de recolección de métricas de base de datos'
+            comments        => 'Launches the database metrics collection cycle'
         );
         
-        DBMS_OUTPUT.PUT_LINE('✅ Job PLT_DB_MONITOR_JOB creado correctamente. Frecuencia: 10s');
+        DBMS_OUTPUT.PUT_LINE('✅ Job PLT_DB_MONITOR_JOB created successfully. Frequency: 10s');
     END;
 
 
@@ -76,4 +76,4 @@ begin
 end;
 /
 
-PROMPT ✅ Jobs creados correctamente.
+PROMPT ✅ Jobs created successfully.
