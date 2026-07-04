@@ -1,0 +1,157 @@
+# =============================================================================
+# PLTelemetry Stack — Podman Edition (with persistent volumes)
+# =============================================================================
+# Oracle 23ai runs SEPARATELY (managed outside this file).
+# This compose file only brings up the OpenTelemetry observability stack:
+#   otel-collector, tempo, loki, prometheus, grafana, mailhog
+#
+# Oracle container "oracle23ai" is connected to the shared network AFTER up.
+# Its volume (oracle23ai-data) is NEVER touched by this file.
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # BRAIN - OpenTelemetry Collector
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: docker.io/otel/opentelemetry-collector-contrib:latest
+    container_name: plt-otel-collector
+    environment:
+      - GOMAXPROCS=8
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP (PL/SQL fires here)
+      - "8888:8888"   # Self metrics
+      - "8889:8889"   # Prometheus Exporter
+      - "13133:13133" # Health check
+      - "55679:55679" # zPages
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TRACES - Tempo
+  # ---------------------------------------------------------------------------
+  tempo:
+    image: docker.io/grafana/tempo:latest
+    container_name: plt-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./configs/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200" # API
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+    user: "0" # Root permissions to write to volume
+
+  # ---------------------------------------------------------------------------
+  # LOGS - Loki
+  # ---------------------------------------------------------------------------
+  loki:
+    image: docker.io/grafana/loki:latest
+    container_name: plt-loki
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./configs/loki.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # METRICS - Prometheus
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: docker.io/prom/prometheus:latest
+    container_name: plt-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-remote-write-receiver'
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # VISUALIZATION - Grafana
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: docker.io/grafana/grafana:latest
+    container_name: plt-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=mailhog:1025
+      - GF_SMTP_SKIP_VERIFY=true
+      - GF_SMTP_FROM_ADDRESS=pltelemetry@grafana.local
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3020:3000" # Grafana on port 3020
+    depends_on:
+      - tempo
+      - loki
+      - prometheus
+      - mailhog
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # EXTRAS - MailHog
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: docker.io/mailhog/mailhog:latest
+    container_name: plt-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - pltelemetry-network
+    restart: unless-stopped
+
+# =============================================================================
+# VOLUMES & NETWORKS
+# =============================================================================
+volumes:
+  grafana-data:
+    name: plt_grafana-data
+
+  prometheus-data:
+    name: plt_prometheus-data
+
+  loki-data:
+    name: plt_loki-data
+
+  tempo-data:
+    name: plt_tempo-data
+
+networks:
+  pltelemetry-network:
+    name: pltelemetry-network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.22.0.0/16

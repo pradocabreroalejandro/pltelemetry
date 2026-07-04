@@ -9,6 +9,14 @@ server:
   grpc_server_max_recv_msg_size: 52428800 # 50MB
   grpc_server_max_send_msg_size: 52428800 # 50MB
 
+# 🔥 Enable OTLP ingestion (replaces deprecated loki exporter)
+distributor:
+  otlp_config:
+    default_resource_attributes_as_index_labels:
+      - service.name
+      - service.instance.id
+      - deployment.environment
+
 common:
   instance_addr: 127.0.0.1
   path_prefix: /loki
@@ -21,19 +29,20 @@ common:
     kvstore:
       store: inmemory
 
+# 🔥 Schema v13 + tsdb index required for OTLP structured metadata
 schema_config:
   configs:
-    - from: 2020-10-24
-      store: boltdb-shipper
+    - from: 2024-01-01
+      store: tsdb
       object_store: filesystem
-      schema: v11
+      schema: v13
       index:
         prefix: index_
         period: 24h
 
-# Compactor Configuration (Correct, we keep it)
+# Compactor Configuration
 compactor:
-  working_directory: /loki/boltdb-shipper-compactor
+  working_directory: /loki/compactor
   compaction_interval: 10m
   retention_enabled: true
   retention_delete_delay: 2h
@@ -42,23 +51,22 @@ compactor:
 
 # 🔥 TUNED LIMITS FOR STRESS TEST 🔥
 limits_config:
-  # Retention (Correct)
-  retention_period: 720h 
+  # OTLP structured metadata (requires schema v13 + tsdb)
+  allow_structured_metadata: true
+  # Retention
+  retention_period: 720h
   reject_old_samples: true
   reject_old_samples_max_age: 168h
-  
-  # Compatibility (Correct)
-  allow_structured_metadata: false 
-  
+
   # 🚀 HERE'S THE TURBO:
   ingestion_rate_mb: 50           # Default is 4MB. Bumped to 50MB/s
   ingestion_burst_size_mb: 100    # Burst allowed up to 100MB
   max_entries_limit_per_query: 50000
   per_stream_rate_limit: 50MB
   per_stream_rate_limit_burst: 100MB
-  
+
   # To avoid errors with long labels in synthetic tests
-  max_label_value_length: 2048 
+  max_label_value_length: 2048
   max_label_name_length: 1024
 
 table_manager:

@@ -17,7 +17,7 @@ receivers:
         - job_name: 'woofy-agent-self-metrics'
           scrape_interval: 10s
           static_configs:
-            - targets: ['host.docker.internal:8080'] 
+            - targets: ['host.containers.internal:8080'] 
 
   prometheus:
     config:
@@ -60,10 +60,10 @@ exporters:
       max_interval: 10s
       max_elapsed_time: 60s # More patience
 
-  loki:
-    endpoint: http://loki:3100/loki/api/v1/push
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
     # 🔥 Explicit timeout for Loki (vital if Loki is slow)
-    timeout: 10s 
+    timeout: 10s
 
   prometheus:
     endpoint: "0.0.0.0:8889"
@@ -104,4 +104,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [loki]
+      exporters: [otlphttp/loki]

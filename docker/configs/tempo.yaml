@@ -9,28 +9,9 @@ distributor:
           endpoint: 0.0.0.0:4317
         http:
           endpoint: 0.0.0.0:4318
-   
-  # Per-span logging disabled (saves CPU)
+
   log_received_spans:
     enabled: false
-
-# 🔥 FINAL FIX: Simplified and compatible overrides format
-overrides:
-  # Global limits for all tenants (using implicit wildcard or global config)
-  ingestion_rate_limit_bytes: 100000000      # 100MB/s
-  ingestion_burst_size_bytes: 200000000      # 200MB burst
-  max_bytes_per_trace: 50000000              # 50MB per trace
-
-ingester:
-  trace_idle_period: 10s
-  max_block_bytes: 5_000_000
-  max_block_duration: 5m
-
-compactor:
-  compaction:
-    compaction_window: 1h
-    max_block_bytes: 100_000_000
-    block_retention: 720h
 
 storage:
   trace:
