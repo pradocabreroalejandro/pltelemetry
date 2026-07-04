@@ -7,10 +7,10 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
     -- INTERNAL HELPER TO LOG ATTRIBUTES
     -- =========================================================================
     PROCEDURE log_kv(p_key VARCHAR2, p_val VARCHAR2) IS
-        l_attrs PLTelemetry.t_attributes;
     BEGIN
-        l_attrs(1) := PLTelemetry.attr(p_key, p_val);
-        PLTelemetry.log('INFO', 'Attribute Log', l_attrs);
+        -- ONE-LINE API: inline JSON attribute, no associative array needed
+        PLTelemetry.log('INFO', 'Attribute Log',
+                        p_attrs_json => '{"' || p_key || '":"' || p_val || '"}');
     END;
 
     -- =========================================================================

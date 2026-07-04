@@ -1,3 +1,5 @@
+SET DEFINE OFF;
+
 CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
 
     -- =========================================================================
@@ -97,3 +99,4 @@ CREATE OR REPLACE PACKAGE BODY PLT_CONFIGURATION AS
     END set_param;
 
 END PLT_CONFIGURATION;
+/

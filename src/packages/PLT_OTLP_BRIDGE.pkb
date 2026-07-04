@@ -1,3 +1,5 @@
+SET DEFINE OFF;
+
 CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
     -- =========================================================================
@@ -211,8 +213,10 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     BEGIN
         l_trace_id := NVL(p_data.get_String('trace_id'), random_hex(32));
         l_span_id := NVL(p_data.get_String('span_id'), random_hex(16));
-        l_start_time := get_timestamp_nano(); 
-        l_end_time := get_timestamp_nano(SYSTIMESTAMP + NUMTODSINTERVAL(0.1, 'SECOND')); 
+        -- Use the REAL span timing emitted by PLTelemetry (ISO-8601 UTC "Z").
+        -- to_unix_nano falls back to SYSTIMESTAMP if the field is missing/unparseable.
+        l_start_time := to_unix_nano(p_data.get_String('start_time'));
+        l_end_time := to_unix_nano(p_data.get_String('end_time'));
 
         l_span.put('traceId', l_trace_id);
         l_span.put('spanId', l_span_id);
@@ -253,7 +257,8 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_scope_log_obj JSON_OBJECT_T := JSON_OBJECT_T();
         l_res_log_obj   JSON_OBJECT_T := JSON_OBJECT_T();
     BEGIN
-        l_log.put('timeUnixNano', get_timestamp_nano());
+        -- Use the emission timestamp from the payload, not the processing time.
+        l_log.put('timeUnixNano', to_unix_nano(p_data.get_String('timestamp')));
         l_log.put('severityText', NVL(p_data.get_String('severity'), 'INFO'));
         
         l_body.put('stringValue', NVL(p_data.get_String('message'), 'Empty log message'));
@@ -346,3 +351,4 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
     END;
 
 END PLT_OTLP_BRIDGE;
+/
