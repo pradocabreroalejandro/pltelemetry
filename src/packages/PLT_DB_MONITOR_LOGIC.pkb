@@ -1,10 +1,13 @@
 CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
 
     ----------------------------------------------------------------------------
-    -- Private: Processes the cursor. 
-    -- NO LONGER NEEDS p_tenant_id as a parameter, it takes it from the environment.
+    -- Private: Processes metrics and sends them to PLTelemetry queue.
+    -- V3 compatible: tenant is passed via p_tenant_id parameter.
     ----------------------------------------------------------------------------
-    PROCEDURE process_metrics(p_dataset t_plt_metric_tab) IS 
+    PROCEDURE process_metrics(
+        p_dataset   t_plt_metric_tab,
+        p_tenant_id VARCHAR2 DEFAULT 'default'
+    ) IS 
         l_attrs PLTelemetry.t_attributes;
         l_json  JSON_OBJECT_T;
         l_keys  JSON_KEY_LIST;
@@ -27,23 +30,25 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
                 END;
             END IF;
 
-            -- Clean call
+            -- V3 compatible: pass tenant explicitly
             PLTelemetry.log_metric(
-                p_name  => p_dataset(i).metric_name,
-                p_value => p_dataset(i).metric_value,
-                p_type  => p_dataset(i).metric_type,
-                p_attrs => l_attrs
+                p_name      => p_dataset(i).metric_name,
+                p_value     => p_dataset(i).metric_value,
+                p_type      => p_dataset(i).metric_type,
+                p_attrs     => l_attrs,
+                p_tenant_id => p_tenant_id
             );
         END LOOP;
     END;
 
     ----------------------------------------------------------------------------
-    -- Executes a collector (Simplified)
+    -- Executes a collector with explicit tenant parameter
     ----------------------------------------------------------------------------
     PROCEDURE run_collector_dynamic(
         p_code      VARCHAR2, 
         p_package   VARCHAR2, 
-        p_func      VARCHAR2
+        p_func      VARCHAR2,
+        p_tenant_id VARCHAR2 DEFAULT 'default'
     ) IS
         l_rows   t_plt_metric_tab;
         l_sql    VARCHAR2(1000);
@@ -54,20 +59,21 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
 
         BEGIN
             EXECUTE IMMEDIATE l_sql BULK COLLECT INTO l_rows;
-            process_metrics(l_rows); 
+            process_metrics(l_rows, p_tenant_id); 
         EXCEPTION 
             WHEN OTHERS THEN
-                -- FIXED: Use Backtrace instead of SQLERRM
                 PLTelemetry.log('ERROR', 'Failure in ' || p_code || ': ' || 
                     SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
-                           DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
+                           DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000),
+                    p_tenant_id => p_tenant_id);
         END;
     END;
 
     ----------------------------------------------------------------------------
-    -- Main Loop (Where we manage the Context)
+    -- Main Loop: Iterates collectors and handles tenant context
     ----------------------------------------------------------------------------
     PROCEDURE run_collection_cycle IS
+        l_tenant_id VARCHAR2(100);
     BEGIN
         FOR r IN (
             SELECT collector_code, reader_package, reader_function, execution_scope
@@ -78,23 +84,29 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
         ) LOOP
             
             IF r.execution_scope = 'PER_TENANT' THEN
-                -- === MULTI-TENANT MODE ===
+                -- === MULTI-TENANT MODE: one call per tenant ===
                 FOR t IN (SELECT tenant_id FROM plt_tenants WHERE is_enabled = 1) LOOP
-                    
-                    PLTelemetry.set_tenant(t.tenant_id);
-                    run_collector_dynamic(r.collector_code, r.reader_package, r.reader_function);
-                    
+                    l_tenant_id := t.tenant_id;
+                    run_collector_dynamic(
+                        r.collector_code, 
+                        r.reader_package, 
+                        r.reader_function,
+                        l_tenant_id
+                    );
                 END LOOP;
                 
             ELSE
-                -- === GLOBAL MODE ===
-                PLTelemetry.set_tenant('default');
-                run_collector_dynamic(r.collector_code, r.reader_package, r.reader_function);
+                -- === GLOBAL MODE: single call with default tenant ===
+                l_tenant_id := 'default';
+                run_collector_dynamic(
+                    r.collector_code, 
+                    r.reader_package, 
+                    r.reader_function,
+                    l_tenant_id
+                );
             END IF;
 
-            -- Reset context for safety on exit
-            PLTelemetry.set_tenant('default');
-
+            -- Update last_run timestamp
             UPDATE plt_metric_collectors 
                SET last_run = SYSTIMESTAMP 
              WHERE collector_code = r.collector_code;
@@ -111,3 +123,5 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
     END;
 
 END PLT_DB_MONITOR_LOGIC;
+
+/

@@ -50,8 +50,8 @@ MERGE INTO plt_pulse_throttling_config t USING (SELECT 'COMA' AS pm, 'GLOBAL' AS
 ON (t.pulse_mode = s.pm AND t.tenant_id = s.tid)
 WHEN NOT MATCHED THEN INSERT (pulse_mode, tenant_id, capacity_multiplier, batch_multiplier, interval_multiplier, sampling_rate, queue_processing, description) VALUES (s.pm, s.tid, s.cm, s.bm, s.im, s.sr, s.qp, s.dsc);
 
--- 3. ACTIVATION RULES (Security by default: OFF)
-MERGE INTO plt_activation_rules t USING (SELECT '*' AS op, 'N' AS ie, 0 AS sr FROM dual) s
+-- 3. ACTIVATION RULES (ENABLED by default for metrics collection)
+MERGE INTO plt_activation_rules t USING (SELECT '*' AS op, 'Y' AS ie, 1.0 AS sr FROM dual) s
 ON (t.object_pattern = s.op)
 WHEN NOT MATCHED THEN INSERT (object_pattern, is_enabled, sample_rate) VALUES (s.op, s.ie, s.sr);
 
@@ -81,6 +81,21 @@ MERGE INTO plt_metric_collectors t USING (SELECT 'STORAGE' AS cc, 'PLT_DB_METRIC
 ON (t.collector_code = s.cc)
 WHEN NOT MATCHED THEN INSERT (collector_code, reader_package, reader_function, interval_seconds, execution_scope) VALUES (s.cc, s.rp, s.rf, s.iv, s.es);
 
+-- 23ai: Automatic Indexing Metrics (every 5 minutes)
+MERGE INTO plt_metric_collectors t USING (SELECT 'INDEXING' AS cc, 'PLT_DB_METRIC_READER' AS rp, 'get_indexing_metrics' AS rf, 300 AS iv, 'GLOBAL' AS es FROM dual) s
+ON (t.collector_code = s.cc)
+WHEN NOT MATCHED THEN INSERT (collector_code, reader_package, reader_function, interval_seconds, execution_scope) VALUES (s.cc, s.rp, s.rf, s.iv, s.es);
+
+-- 23ai: In-Memory Metrics (every minute)
+MERGE INTO plt_metric_collectors t USING (SELECT 'INMEMORY' AS cc, 'PLT_DB_METRIC_READER' AS rp, 'get_inmemory_metrics' AS rf, 60 AS iv, 'GLOBAL' AS es FROM dual) s
+ON (t.collector_code = s.cc)
+WHEN NOT MATCHED THEN INSERT (collector_code, reader_package, reader_function, interval_seconds, execution_scope) VALUES (s.cc, s.rp, s.rf, s.iv, s.es);
+
+-- TNS Listener & Network Health (every 30 seconds - critical for connection monitoring)
+MERGE INTO plt_metric_collectors t USING (SELECT 'LISTENER' AS cc, 'PLT_DB_METRIC_READER' AS rp, 'get_listener_metrics' AS rf, 30 AS iv, 'GLOBAL' AS es FROM dual) s
+ON (t.collector_code = s.cc)
+WHEN NOT MATCHED THEN INSERT (collector_code, reader_package, reader_function, interval_seconds, execution_scope) VALUES (s.cc, s.rp, s.rf, s.iv, s.es);
+
 COMMIT;
 
-PROMPT ✅ Initial data loaded.
+PROMPT ✅ Initial data loaded with Oracle 23ai enhanced metrics.

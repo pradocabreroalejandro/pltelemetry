@@ -192,9 +192,10 @@ BEGIN
 END;
 /
 """
+    sqlplus_bin = get_sqlplus_path()
     try:
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", sys_conn],
+            [sqlplus_bin, "-S", "-L", sys_conn],
             input=drop_jobs_sql,
             capture_output=True,
             text=True,
@@ -230,7 +231,7 @@ END;
 """
     try:
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", sys_conn],
+            [sqlplus_bin, "-S", "-L", sys_conn],
             input=drop_acl_sql,
             capture_output=True,
             text=True,
@@ -252,7 +253,7 @@ END;
 """
     try:
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", sys_conn],
+            [sqlplus_bin, "-S", "-L", sys_conn],
             input=drop_user_sql,
             capture_output=True,
             text=True,
@@ -271,7 +272,7 @@ END;
     purge_sql = "PURGE DBA_RECYCLEBIN;"
     try:
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", sys_conn],
+            [sqlplus_bin, "-S", "-L", sys_conn],
             input=purge_sql,
             capture_output=True,
             text=True,
@@ -309,12 +310,21 @@ def run_test_script(
 
     try:
         sql_content = sql_path.read_text(encoding="utf-8")
+        sqlplus_bin = get_sqlplus_path()
+        
+        # Set LD_LIBRARY_PATH for Oracle Instant Client
+        env = os.environ.copy()
+        oracle_lib = "/opt/oracle/instantclient_23_5"
+        if os.path.exists(oracle_lib):
+            env["LD_LIBRARY_PATH"] = oracle_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+        
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", schema_conn],
+            [sqlplus_bin, "-S", "-L", schema_conn],
             input=sql_content,
             capture_output=True,
             text=True,
             timeout=300,  # Tests may take longer
+            env=env,
         )
 
         output = result.stdout + result.stderr
@@ -413,6 +423,25 @@ def prepare_sql(sql_content: str, config: dict) -> str:
 # ---------------------------------------------------------------------------
 # SQL*Plus execution
 # ---------------------------------------------------------------------------
+def get_sqlplus_path() -> str:
+    """Get sqlplus executable path."""
+    # Check common Oracle Instant Client paths
+    common_paths = [
+        "/opt/oracle/instantclient_23_5/sqlplus",
+        "/opt/oracle/instantclient_23_6/sqlplus",
+        "/opt/oracle/product/23ai/dbhomeFree/bin/sqlplus",
+        "/usr/bin/sqlplus",
+        "/usr/local/bin/sqlplus",
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Fallback to PATH
+    return "sqlplus"
+
+
 def build_connection_string(config: dict, conn_type: str) -> str:
     """Build sqlplus connection string."""
     conn = config["connection"]
@@ -456,12 +485,21 @@ def run_sql_file(
         # Read SQL content, prepend SET DEFINE OFF (avoid & substitution),
         # and append EXIT so sqlplus terminates
         sql_content = "SET DEFINE OFF;\n" + sql_path.read_text(encoding="utf-8") + "\nEXIT;\n"
+        sqlplus_bin = get_sqlplus_path()
+        
+        # Set LD_LIBRARY_PATH for Oracle Instant Client
+        env = os.environ.copy()
+        oracle_lib = "/opt/oracle/instantclient_23_5"
+        if os.path.exists(oracle_lib):
+            env["LD_LIBRARY_PATH"] = oracle_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+        
         result = subprocess.run(
-            ["sqlplus", "-S", "-L", conn_string],
+            [sqlplus_bin, "-S", "-L", conn_string],
             input=sql_content,
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
 
         output = result.stdout + result.stderr
@@ -610,9 +648,10 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
     if args.dry_run:
         print("SKIPPED (dry-run)")
     else:
+        sqlplus_bin = get_sqlplus_path()
         try:
             result = subprocess.run(
-                ["sqlplus", "-S", "-L", sys_conn],
+                [sqlplus_bin, "-S", "-L", sys_conn],
                 input=create_user_sql,
                 capture_output=True,
                 text=True,
