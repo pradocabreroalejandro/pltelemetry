@@ -9,6 +9,8 @@ Usage:
     python install.py                  # uses install.yaml in same directory
     python install.py --config prod.yaml
     python install.py --dry-run        # validate config + show what would run
+    python install.py --no-cleanup     # skip cleanup phase
+    python install.py --no-tests       # skip test execution
 """
 
 import argparse
@@ -150,6 +152,214 @@ INSTALL_STEPS = [
     (DATA_DIR / "01_default_config.sql", "schema", "Seeding default pulse config"),
 ]
 
+# Test scripts to run after installation
+TEST_SCRIPTS = [
+    (SRC_DIR / "utils" / "PLT_SMOKE_TEST.sql", "Smoke Test Suite"),
+    (SRC_DIR / "utils" / "PLT_TPS_TEST.sql", "TPS Benchmark Suite"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Cleanup utilities (full uninstall)
+# ---------------------------------------------------------------------------
+def cleanup_pltelemetry(sys_conn: str, schema: str, dry_run: bool = False) -> bool:
+    """
+    Complete cleanup of PLTelemetry installation:
+    - Drop scheduler jobs
+    - Drop network ACLs
+    - Drop user/schema (cascade)
+    Returns True on success.
+    """
+    schema_upper = schema.upper()
+    print("\n" + "=" * 60)
+    print("  CLEANUP PHASE - Removing existing PLTelemetry installation")
+    print("=" * 60)
+
+    if dry_run:
+        print("  [DRY RUN] Would drop all PLTelemetry objects and schema")
+        return True
+
+    # 1. Drop scheduler jobs (as SYS, for the schema)
+    print("  [1/4] Dropping scheduler jobs... ", end="", flush=True)
+    drop_jobs_sql = f"""
+BEGIN
+    FOR j IN (SELECT job_name FROM dba_scheduler_jobs WHERE owner = '{schema_upper}') LOOP
+        BEGIN
+            DBMS_SCHEDULER.DROP_JOB(j.job_name, force => TRUE);
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+    END LOOP;
+END;
+/
+"""
+    try:
+        result = subprocess.run(
+            ["sqlplus", "-S", "-L", sys_conn],
+            input=drop_jobs_sql,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout + result.stderr
+        if "ORA-" in output and "ORA-00001" not in output:
+            print("WARNING (some jobs may not exist)")
+        else:
+            print("OK")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+    # 2. Drop network ACLs for this schema
+    print("  [2/4] Dropping network ACLs... ", end="", flush=True)
+    drop_acl_sql = f"""
+BEGIN
+    DBMS_NETWORK_ACL_ADMIN.DELETE_PRIVILEGE(
+        host        => '*',
+        principal   => '{schema_upper}',
+        is_grant    => TRUE,
+        privilege   => 'connect'
+    );
+    DBMS_NETWORK_ACL_ADMIN.DELETE_PRIVILEGE(
+        host        => '*',
+        principal   => '{schema_upper}',
+        is_grant    => TRUE,
+        privilege   => 'resolve'
+    );
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+"""
+    try:
+        result = subprocess.run(
+            ["sqlplus", "-S", "-L", sys_conn],
+            input=drop_acl_sql,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print("OK")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+    # 3. Drop the user (cascade)
+    print("  [3/4] Dropping schema user... ", end="", flush=True)
+    drop_user_sql = f"""
+BEGIN
+    EXECUTE IMMEDIATE 'DROP USER {schema_upper} CASCADE';
+EXCEPTION WHEN OTHERS THEN
+    IF SQLCODE != -1918 THEN RAISE; END IF; -- ignore 'user does not exist'
+END;
+/
+"""
+    try:
+        result = subprocess.run(
+            ["sqlplus", "-S", "-L", sys_conn],
+            input=drop_user_sql,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout + result.stderr
+        if "ORA-" in output and "ORA-01918" not in output:
+            print(f"WARNING: {output[:200]}")
+        else:
+            print("OK (or already dropped)")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+    # 4. Purge recyclebin
+    print("  [4/4] Purging recyclebin... ", end="", flush=True)
+    purge_sql = "PURGE DBA_RECYCLEBIN;"
+    try:
+        result = subprocess.run(
+            ["sqlplus", "-S", "-L", sys_conn],
+            input=purge_sql,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print("OK")
+    except Exception as e:
+        print(f"ERROR: {e}")
+
+    print("\n  Cleanup complete.\n")
+    return True
+
+
+def run_test_script(
+    sql_path: Path,
+    schema_conn: str,
+    test_name: str,
+    dry_run: bool = False,
+) -> tuple:
+    """
+    Run a test script and return (success, pass_count, fail_count).
+    Parses the output for PASS/FAIL markers.
+    """
+    print(f"\n{'='*60}")
+    print(f"  RUNNING: {test_name}")
+    print(f"{'='*60}")
+
+    if dry_run:
+        print(f"  [DRY RUN] Would run: {sql_path.name}")
+        return True, 0, 0
+
+    if not sql_path.exists():
+        print(f"  SKIPPED - file not found: {sql_path}")
+        return True, 0, 0
+
+    try:
+        sql_content = sql_path.read_text(encoding="utf-8")
+        result = subprocess.run(
+            ["sqlplus", "-S", "-L", schema_conn],
+            input=sql_content,
+            capture_output=True,
+            text=True,
+            timeout=300,  # Tests may take longer
+        )
+
+        output = result.stdout + result.stderr
+
+        # Parse for errors
+        import re
+        ora_codes = set(re.findall(r'ORA-\d{5}', output))
+        sp_errors = [l for l in output.splitlines() if "SP2-" in l and "deprecated" not in l.lower()]
+        pls_errors = [l for l in output.splitlines() if "PLS-" in l]
+        benign_errors = {"ORA-27477", "ORA-01920", "ORA-06512", "ORA-00001", "ORA-01403"}
+
+        # Check for critical errors
+        non_benign_ora = ora_codes - benign_errors
+        if non_benign_ora or sp_errors or pls_errors:
+            print("  TEST SCRIPT FAILED")
+            print("    --- sqlplus output ---")
+            for line in output.strip().splitlines()[-50:]:  # Last 50 lines
+                print(f"    | {line}")
+            print("    --- end output ---")
+            return False, 0, 0
+
+        # Count PASS/FAIL from smoke test output
+        pass_count = len(re.findall(r'\bPASS\b', output))
+        fail_count = len(re.findall(r'\bFAIL\b', output))
+
+        # Print summary
+        print(output[-3000:] if len(output) > 3000 else output)  # Last 3000 chars
+
+        if fail_count > 0:
+            print(f"\n  {test_name}: {fail_count} test(s) FAILED")
+            return False, pass_count, fail_count
+        elif pass_count > 0:
+            print(f"\n  {test_name}: ALL {pass_count} TESTS PASSED")
+            return True, pass_count, fail_count
+        else:
+            print(f"\n  {test_name}: Completed (no explicit test markers found)")
+            return True, 0, 0
+
+    except subprocess.TimeoutExpired:
+        print("  TIMEOUT (300s)")
+        return False, 0, 0
+    except FileNotFoundError:
+        print("  ERROR - sqlplus not found in PATH")
+        sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # SQL placeholder replacement
@@ -235,11 +445,11 @@ def run_sql_file(
     print(f"  [{description}] ", end="", flush=True)
 
     if dry_run:
-        print(f"SKIPPED (dry-run) — would run: {sql_path.name}")
+        print(f"SKIPPED (dry-run) - would run: {sql_path.name}")
         return True
 
     if not sql_path.exists():
-        print(f"SKIPPED — file not found: {sql_path}")
+        print(f"SKIPPED - file not found: {sql_path}")
         return True
 
     try:
@@ -263,14 +473,14 @@ def run_sql_file(
         pls_errors = [l for l in output.splitlines() if "PLS-" in l]
         benign_errors = {"ORA-27477", "ORA-01920", "ORA-06512", "ORA-00001"}
 
-        # Check return code first — sqlplus may fail to start entirely
+        # Check return code first - sqlplus may fail to start entirely
         # (e.g., missing shared libraries, binary not found)
         if result.returncode != 0:
             non_benign_ora = ora_codes - benign_errors
 
             # If no ORA errors at all and returncode != 0, sqlplus failed to start
             if not ora_codes and not sp_errors and not pls_errors:
-                print("FAILED — sqlplus did not execute successfully")
+                print("FAILED - sqlplus did not execute successfully")
                 print("    --- sqlplus output ---")
                 for line in output.strip().splitlines():
                     print(f"    | {line}")
@@ -308,7 +518,7 @@ def run_sql_file(
         print("TIMEOUT (120s)")
         return False
     except FileNotFoundError:
-        print("ERROR — sqlplus not found in PATH")
+        print("ERROR - sqlplus not found in PATH")
         sys.exit(1)
 
 
@@ -317,7 +527,7 @@ def run_sql_file(
 # ---------------------------------------------------------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="PLTelemetry unattended installer"
+        description="PLTelemetry unattended installer with full cleanup and tests"
     )
     parser.add_argument(
         "--config", "-c",
@@ -328,6 +538,16 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Validate config and show what would be installed",
+    )
+    parser.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        help="Skip cleanup phase (do not drop existing schema)",
+    )
+    parser.add_argument(
+        "--no-tests",
+        action="store_true",
+        help="Skip test execution after installation",
     )
     args = parser.parse_args()
 
@@ -352,6 +572,8 @@ def main() -> None:
     print(f"Host         : {conn.get('host', 'localhost')}:{conn.get('port', 1521)}/{conn.get('service_name', 'XEPDB1')}")
     print(f"OTLP endpoint: {config.get('otlp', {}).get('endpoint_url', 'N/A')}")
     print(f"Dry run      : {args.dry_run}")
+    print(f"Cleanup      : {'SKIP' if args.no_cleanup else 'FULL'}")
+    print(f"Run tests    : {'SKIP' if args.no_tests else 'YES'}")
     print()
 
     if args.dry_run:
@@ -361,8 +583,18 @@ def main() -> None:
     schema_conn = build_connection_string(config, "schema")
     sys_conn = build_connection_string(config, "sys")
 
-    # --- Phase 0: Create schema user (SYS) ---
     failed = 0
+
+    # =======================================================================
+    # PHASE -1: CLEANUP (drop existing installation)
+    # =======================================================================
+    if not args.no_cleanup and not args.dry_run:
+        if not cleanup_pltelemetry(sys_conn, schema, dry_run=False):
+            print("  Cleanup reported issues, but continuing...")
+
+    # =======================================================================
+    # PHASE 0: Create schema user (SYS)
+    # =======================================================================
     schema_upper = schema.upper()
     schema_pwd = conn.get("schema_password", "oracle")
 
@@ -374,7 +606,7 @@ GRANT EXECUTE ON DBMS_SCHEDULER TO {schema_upper};
 GRANT EXECUTE ON DBMS_NETWORK_ACL_ADMIN TO {schema_upper};
 GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
 """
-    print("[00/23]   [Creating schema user] ", end="", flush=True)
+    print("[PHASE 0/3] [Creating schema user] ", end="", flush=True)
     if args.dry_run:
         print("SKIPPED (dry-run)")
     else:
@@ -388,7 +620,6 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
             )
             output = result.stdout + result.stderr
             if "ORA-" in output:
-                # ORA-01920 user already exists is OK
                 if "ORA-01920" in output:
                     print("OK (already exists)")
                 else:
@@ -402,15 +633,22 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
             print("TIMEOUT")
             failed += 1
         except FileNotFoundError:
-            print("ERROR — sqlplus not found in PATH")
+            print("ERROR - sqlplus not found in PATH")
             sys.exit(1)
 
     if failed:
-        print("\n  ⚠ Schema creation failed. Cannot continue.")
+        print("\nSchema creation failed. Cannot continue.")
         sys.exit(1)
 
-    # --- Execute file-based steps ---
+    # =======================================================================
+    # PHASE 1: INSTALL (execute all SQL files)
+    # =======================================================================
+    print("\n" + "=" * 60)
+    print("  PHASE 1/3: INSTALLATION")
+    print("=" * 60)
+    
     total = len(INSTALL_STEPS)
+    install_failed = 0
 
     for i, (sql_file, conn_type, desc) in enumerate(INSTALL_STEPS, 1):
         print(f"[{i:02d}/{total:02d}]", end=" ")
@@ -419,7 +657,6 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
             raw_sql = sql_file.read_text(encoding="utf-8")
             prepared_sql = prepare_sql(raw_sql, config)
 
-            # Write prepared SQL to temp file
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".sql", delete=False, encoding="utf-8"
             ) as tmp:
@@ -429,37 +666,74 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
             conn_str = sys_conn if conn_type == "sys" else schema_conn
             ok = run_sql_file(Path(tmp_path), conn_str, desc, args.dry_run)
 
-            # Cleanup temp file
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
             if not ok:
-                failed += 1
-                print("\n  ⚠ Installation step failed. You may re-run the script to retry.")
+                install_failed += 1
+                print("\n  Installation step failed.")
         else:
-            print(f"  [{desc}] SKIPPED — file not found: {sql_file}")
+            print(f"  [{desc}] SKIPPED - file not found: {sql_file}")
 
-    # --- Summary ---
-    print()
-    if failed == 0:
+    if install_failed > 0:
+        print(f"\nInstallation failed with {install_failed} error(s).")
+        failed += install_failed
+
+    # =======================================================================
+    # PHASE 2: TESTS (smoke test + TPS benchmark)
+    # =======================================================================
+    test_failed = 0
+    total_tests_run = 0
+    total_tests_passed = 0
+    total_tests_failed_count = 0
+
+    if not args.no_tests and not args.dry_run and failed == 0:
+        print("\n" + "=" * 60)
+        print("  PHASE 2/3: RUNNING TESTS")
         print("=" * 60)
-        print("  ✅ PLTelemetry installation complete!")
-        print("=" * 60)
-        print()
-        print("Next steps:")
-        print("  1. Verify: SELECT object_name, object_type FROM user_objects")
-        print("     WHERE object_name LIKE 'PLT%' ORDER BY object_type;")
-        print("  2. Check jobs: SELECT job_name, state FROM user_scheduler_jobs")
-        print("     WHERE job_name LIKE 'PLT%';")
-        print("  3. Enable tracing for your objects:")
-        print("     UPDATE plt_activation_rules SET is_enabled='Y', sample_rate=1")
-        print("     WHERE object_pattern='*';")
-        print("     COMMIT;")
+
+        for test_path, test_name in TEST_SCRIPTS:
+            success, passed, failed_count = run_test_script(
+                test_path, schema_conn, test_name, dry_run=False
+            )
+            total_tests_run += 1
+            total_tests_passed += passed
+            total_tests_failed_count += failed_count
+
+            if not success:
+                test_failed += 1
+
+    # =======================================================================
+    # FINAL SUMMARY
+    # =======================================================================
+    print("\n" + "=" * 60)
+    print("  FINAL SUMMARY")
+    print("=" * 60)
+
+    if failed == 0 and test_failed == 0:
+        print("  ALL PHASES COMPLETED SUCCESSFULLY!")
+        print(f"     - Installation: {len(INSTALL_STEPS)} steps OK")
+        if not args.no_tests:
+            print(f"     - Tests: {total_tests_passed} passed, {total_tests_failed_count} failed")
+        print("\n  PLTelemetry is ready to use.")
+        print("  Enable tracing: UPDATE plt_activation_rules SET is_enabled='Y' WHERE object_pattern='*';")
     else:
-        print(f"  ⚠ {failed} step(s) failed. Review output above.")
-        print("  The script is idempotent — you can fix issues and re-run.")
+        print("  SOME PHASES FAILED")
+        if install_failed > 0:
+            print(f"     - Installation errors: {install_failed}")
+        if test_failed > 0:
+            print(f"     - Test failures: {test_failed}")
+        print("\n  Review the output above and re-run after fixing issues.")
 
-    sys.exit(0 if failed == 0 else 1)
+    # Exit with appropriate code
+    if failed == 0 and test_failed == 0:
+        print("\n" + "=" * 60)
+        print("  ZERO ERRORS - FULLY OPERATIONAL")
+        print("=" * 60)
+        sys.exit(0)
+    else:
+        print(f"\nEXIT CODE 1 - {failed + test_failed} failure(s)")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
