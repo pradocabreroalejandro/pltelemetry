@@ -11,7 +11,7 @@ BEGIN
         
         UPDATE plt_agent_registry 
         SET status_message = 'DEAD', updated_at = SYSTIMESTAMP 
-        WHERE agent_id = 'PRIMARY_AGENT';
+        WHERE agent_id = 'PRIMARY';
         
         -- Make sure the PL/SQL processor is ON
         -- (Doesn't fail if already on)
@@ -25,14 +25,14 @@ BEGIN
     ELSE
         -- 🟢 ALL OK
         -- If it was marked as DEAD, revive it
-        SELECT status_message INTO l_status_msg FROM plt_agent_registry WHERE agent_id = 'PRIMARY_AGENT';
+        SELECT status_message INTO l_status_msg FROM plt_agent_registry WHERE agent_id = 'PRIMARY';
         
         IF l_status_msg = 'DEAD' THEN
             DBMS_OUTPUT.PUT_LINE('✅ Agent recovered. Shutting down PL/SQL Failover.');
             
             UPDATE plt_agent_registry 
             SET status_message = 'RUNNING', updated_at = SYSTIMESTAMP 
-            WHERE agent_id = 'PRIMARY_AGENT';
+            WHERE agent_id = 'PRIMARY';
             
             -- TURN OFF the failover job to save resources
             BEGIN

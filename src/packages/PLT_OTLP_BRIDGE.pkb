@@ -129,32 +129,51 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         END LOOP;
 
         l_res := UTL_HTTP.GET_RESPONSE(l_req);
-        BEGIN LOOP UTL_HTTP.READ_TEXT(l_res, l_buff, 32000); END LOOP; EXCEPTION WHEN UTL_HTTP.END_OF_BODY THEN NULL; END;
+        l_buff := '';
+        BEGIN LOOP
+            DECLARE l_chunk VARCHAR2(32000);
+            BEGIN UTL_HTTP.READ_TEXT(l_res, l_chunk, 32000); l_buff := l_buff || l_chunk; END;
+        END LOOP; EXCEPTION WHEN UTL_HTTP.END_OF_BODY THEN NULL; END;
         UTL_HTTP.END_RESPONSE(l_res);
+
+        DBMS_OUTPUT.PUT_LINE('[send_http] ' || p_path || ' status=' || l_res.status_code ||
+            ' body=' || SUBSTR(l_buff, 1, 400));
+
+        -- A 4xx/5xx means the collector rejected the WHOLE request (e.g. a malformed
+        -- metric). UTL_HTTP only raises on NETWORK errors, NOT on HTTP error status,
+        -- so without this check a 400 is silently swallowed and callers mark items
+        -- PROCESSED even though nothing was ingested. Raise so process_queue can
+        -- fall back to per-item sends and mark the offending item FAILED.
+        IF l_res.status_code NOT BETWEEN 200 AND 299 THEN
+            RAISE_APPLICATION_ERROR(-20003,
+                'HTTP ' || l_res.status_code || ' from ' || l_url || ': ' || SUBSTR(l_buff, 1, 500));
+        END IF;
     EXCEPTION WHEN OTHERS THEN
         BEGIN UTL_HTTP.END_RESPONSE(l_res); EXCEPTION WHEN OTHERS THEN NULL; END;
-        RAISE_APPLICATION_ERROR(-20002, 'HTTP Fail to ' || l_url || ': ' || 
-            SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) || 
-                   'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
+        IF SQLCODE = -20003 THEN
+            RAISE;  -- our status-code error: propagate the clean message as-is
+        ELSE
+            RAISE_APPLICATION_ERROR(-20002, 'HTTP Fail to ' || l_url || ': ' ||
+                SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) ||
+                       'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
+        END IF;
     END;
 
     -- =========================================================================
     -- TELEMETRY SENDERS (No logical changes, just use the functions above)
     -- =========================================================================
 
-    PROCEDURE send_metric(p_src JSON_OBJECT_T) IS
-        l_otlp_root JSON_OBJECT_T := JSON_OBJECT_T();
-        l_rm        JSON_ARRAY_T := JSON_ARRAY_T(); 
-        l_rm_obj    JSON_OBJECT_T := JSON_OBJECT_T();
-        l_sm        JSON_ARRAY_T := JSON_ARRAY_T(); 
-        l_sm_obj    JSON_OBJECT_T := JSON_OBJECT_T();
-        l_metrics   JSON_ARRAY_T := JSON_ARRAY_T();
+    -- Builds a single OTLP metric object (name + sum/gauge + one dataPoint) from a
+    -- metric payload. Shared by send_metric (1-per-POST) and send_metrics_batch
+    -- (N-per-POST). The dataPoint keeps the payload's emission timestamp
+    -- (to_unix_nano(payload.timestamp)) — this is intentional OTel semantics.
+    FUNCTION build_metric_obj(p_src JSON_OBJECT_T) RETURN JSON_OBJECT_T IS
         l_m_obj     JSON_OBJECT_T := JSON_OBJECT_T();
         l_data      JSON_OBJECT_T := JSON_OBJECT_T();
-        l_pts       JSON_ARRAY_T := JSON_ARRAY_T();
+        l_pts       JSON_ARRAY_T  := JSON_ARRAY_T();
         l_pt        JSON_OBJECT_T := JSON_OBJECT_T();
-        l_attrs     JSON_ARRAY_T := JSON_ARRAY_T(); 
-        
+        l_attrs     JSON_ARRAY_T  := JSON_ARRAY_T();
+
         l_name      VARCHAR2(255) := p_src.get_string('name');
         l_val       NUMBER := p_src.get_number('value');
         l_type      VARCHAR2(50) := NVL(p_src.get_string('type'), 'GAUGE');
@@ -168,16 +187,37 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
             l_v.put('stringValue', v); l_kv.put('key', k); l_kv.put('value', l_v); l_attrs.append(l_kv);
         END;
     BEGIN
+        -- A NULL value (e.g. oracle_rman_backup_status when there is no recent
+        -- backup) cannot be represented in OTLP — asDouble:null / asInt:null are
+        -- rejected by the collector with HTTP 400 "ReadUint64: unsupported value
+        -- type", which drops the whole request. Per the project's "prefer losing
+        -- metrics over faking them" principle, skip the metric entirely (return
+        -- NULL) rather than coerce to 0. Callers must check for NULL and not
+        -- append it to the OTLP arrays.
+        IF l_val IS NULL THEN
+            RETURN NULL;
+        END IF;
+
         l_pt.put('timeUnixNano', to_unix_nano(p_src.get_string('timestamp')));
-        IF l_type = 'COUNTER' THEN l_pt.put('asInt', l_val); ELSE l_pt.put('asDouble', l_val); END IF;
-        
+        -- OTLP asInt is a signed 64-bit INTEGER; the collector rejects a fractional
+        -- value with HTTP 400 "assertInteger: can not decode float as int" — which
+        -- drops the WHOLE /v1/metrics request, not just one metric. Producer counters
+        -- are often fractional (e.g. 732500.78 seconds), so use asInt only when the
+        -- value is a whole number within int64 range; otherwise asDouble. Gauges are
+        -- always asDouble (handles both integer and fractional).
+        IF l_type = 'COUNTER' AND l_val = TRUNC(l_val) AND ABS(l_val) < 9223372036854775807 THEN
+            l_pt.put('asInt', l_val);
+        ELSE
+            l_pt.put('asDouble', l_val);
+        END IF;
+
         IF l_trace_id IS NOT NULL THEN add_pt_attr('trace_id', l_trace_id); END IF;
         IF l_span_id IS NOT NULL THEN add_pt_attr('span_id', l_span_id); END IF;
-        
+
         l_pt.put('attributes', l_attrs);
         l_pts.append(l_pt);
         l_data.put('dataPoints', l_pts);
-        
+
         l_m_obj.put('name', l_name);
         IF l_type = 'COUNTER' THEN
             l_data.put('isMonotonic', TRUE); l_data.put('aggregationTemporality', 2);
@@ -185,7 +225,23 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         ELSE
             l_m_obj.put('gauge', l_data);
         END IF;
-        l_metrics.append(l_m_obj);
+        RETURN l_m_obj;
+    END;
+
+    PROCEDURE send_metric(p_src JSON_OBJECT_T) IS
+        l_otlp_root JSON_OBJECT_T := JSON_OBJECT_T();
+        l_rm        JSON_ARRAY_T := JSON_ARRAY_T();
+        l_rm_obj    JSON_OBJECT_T := JSON_OBJECT_T();
+        l_sm        JSON_ARRAY_T := JSON_ARRAY_T();
+        l_sm_obj    JSON_OBJECT_T := JSON_OBJECT_T();
+        l_metrics   JSON_ARRAY_T := JSON_ARRAY_T();
+        l_m         JSON_OBJECT_T;
+    BEGIN
+        l_m := build_metric_obj(p_src);
+        IF l_m IS NULL THEN
+            RETURN;  -- NULL-valued metric (e.g. no backup): skip, don't send
+        END IF;
+        l_metrics.append(l_m);
         l_sm_obj.put('metrics', l_metrics);
         l_sm.append(l_sm_obj);
         l_rm_obj.put('resource', get_resource(p_src.get_string('tenant_id')));
@@ -194,6 +250,70 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_otlp_root.put('resourceMetrics', l_rm);
 
         send_http('/v1/metrics', l_otlp_root.to_clob());
+    END;
+
+    -- Sends N metric payloads in a SINGLE /v1/metrics POST. Metrics are grouped by
+    -- tenant_id so each tenant gets its own resourceMetrics block (resource attrs,
+    -- incl. tenant.id, come from get_resource). Used by the failover path to drain
+    -- the queue without 1-POST-per-metric overhead.
+    PROCEDURE send_metrics_batch(p_metrics SYS.JSON_ARRAY_T) IS
+        l_otlp_root JSON_OBJECT_T := JSON_OBJECT_T();
+        l_rm        JSON_ARRAY_T  := JSON_ARRAY_T();
+
+        TYPE t_metrics_by_tenant IS TABLE OF JSON_ARRAY_T INDEX BY VARCHAR2(100);
+        l_by_tenant t_metrics_by_tenant;
+
+        l_src       JSON_OBJECT_T;
+        l_tenant    VARCHAR2(100);
+        l_key       VARCHAR2(100);
+        l_size      NUMBER;
+        l_rm_obj    JSON_OBJECT_T;
+        l_sm        JSON_ARRAY_T;
+        l_sm_obj    JSON_OBJECT_T;
+        l_m         JSON_OBJECT_T;
+        l_skipped   NUMBER := 0;
+    BEGIN
+        l_size := p_metrics.get_size();
+        FOR i IN 0..l_size-1 LOOP
+            l_src := TREAT(p_metrics.get(i) AS JSON_OBJECT_T);
+            l_m := build_metric_obj(l_src);
+            IF l_m IS NULL THEN
+                l_skipped := l_skipped + 1;  -- NULL-valued metric: skip, don't poison the batch
+                CONTINUE;
+            END IF;
+            l_tenant := NVL(l_src.get_string('tenant_id'), 'default');
+            IF NOT l_by_tenant.exists(l_tenant) THEN
+                l_by_tenant(l_tenant) := JSON_ARRAY_T();
+            END IF;
+            l_by_tenant(l_tenant).append(l_m);
+        END LOOP;
+        -- If every metric in the batch was NULL-valued, there is nothing to send.
+        -- Don't POST an empty resourceMetrics array (the collector would 400 on
+        -- an empty request); just return.
+        IF l_skipped = l_size THEN
+            RETURN;
+        END IF;
+
+        l_key := l_by_tenant.first;
+        WHILE l_key IS NOT NULL LOOP
+            l_sm_obj := JSON_OBJECT_T();
+            l_sm_obj.put('metrics', l_by_tenant(l_key));
+            l_sm := JSON_ARRAY_T();
+            l_sm.append(l_sm_obj);
+            l_rm_obj := JSON_OBJECT_T();
+            l_rm_obj.put('resource', get_resource(l_key));
+            l_rm_obj.put('scopeMetrics', l_sm);
+            l_rm.append(l_rm_obj);
+            l_key := l_by_tenant.next(l_key);
+        END LOOP;
+
+        l_otlp_root.put('resourceMetrics', l_rm);
+        send_http('/v1/metrics', l_otlp_root.to_clob());
+    EXCEPTION WHEN OTHERS THEN
+        log_debug('send_metrics_batch error: ' ||
+            SUBSTR('Stack: ' || DBMS_UTILITY.FORMAT_ERROR_STACK || CHR(10) ||
+                   'Backtrace: ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE, 1, 4000));
+        RAISE; -- Re-raise so process_queue can fall back to per-item send
     END;
 
     PROCEDURE send_trace(p_data JSON_OBJECT_T) IS
@@ -333,7 +453,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
 
     PROCEDURE run_failover_processing IS
         l_is_alive BOOLEAN;
-        l_batch_size NUMBER := 50; 
+        l_batch_size NUMBER := 500;
     BEGIN
         l_is_alive := pltelemetry.is_agent_healthy();
 

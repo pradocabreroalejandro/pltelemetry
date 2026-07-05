@@ -18,7 +18,7 @@ BEGIN
         job_type        => 'PLSQL_BLOCK',
         job_action      => 'BEGIN PLT_OTLP_BRIDGE.run_failover_processing; END;',
         start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=MINUTELY; INTERVAL=1',
+        repeat_interval => 'FREQ=SECONDLY; INTERVAL=15',
         enabled         => TRUE,
         comments        => 'Watchdog: Processes queue via UTL_HTTP if Go Agent dies'
     );

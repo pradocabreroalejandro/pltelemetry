@@ -586,29 +586,80 @@ create or replace package body pltelemetry as
              where status = 'NEW'
              order by id asc
              fetch first p_batch_size rows only;
-        l_err_msg varchar2(4000);
+        type t_id_arr is table of number index by pls_integer;
+        l_metric_ids        t_id_arr;
+        l_metric_payloads   sys.json_array_t := sys.json_array_t();
+        l_metric_count      pls_integer := 0;
+        l_err_msg           varchar2(4000);
+        l_payload_clob      clob;
     begin
         plt_otlp_bridge.init(null, null, null);
         for r in c_pending loop
+            if r.item_type = 'METRIC' then
+                -- accumulate: drain all metrics in a single batched POST after the loop
+                l_metric_count := l_metric_count + 1;
+                l_metric_ids(l_metric_count) := r.id;
+                l_metric_payloads.append(sys.json_object_t.parse(r.payload));
+            else
+                -- TRACE / LOG: low volume, keep per-item send
+                begin
+                    plt_otlp_bridge.process_payload(r.item_type, r.payload);
+                    update plt_queue_writer
+                       set status = 'PROCESSED', updated_at = systimestamp
+                     where id = r.id;
+                exception
+                    when others then
+                        l_err_msg := substr(                             -- [LOG:debug]
+                            'Stack: '     || dbms_utility.format_error_stack || chr(10)
+                            || 'Backtrace: ' || dbms_utility.format_error_backtrace,
+                            1, 4000);
+                        update plt_queue_writer
+                           set status        = 'FAILED',
+                               error_message = l_err_msg,
+                               retry_count   = retry_count + 1,
+                               updated_at    = systimestamp
+                         where id = r.id;
+                end;
+            end if;
+        end loop;
+
+        -- flush all accumulated metrics in ONE OTLP POST
+        if l_metric_count > 0 then
             begin
-                plt_otlp_bridge.process_payload(r.item_type, r.payload);
-                update plt_queue_writer
-                   set status = 'PROCESSED', updated_at = systimestamp
-                 where id = r.id;
+                plt_otlp_bridge.send_metrics_batch(l_metric_payloads);
+                for i in 1..l_metric_count loop
+                    update plt_queue_writer
+                       set status = 'PROCESSED', updated_at = systimestamp
+                     where id = l_metric_ids(i);
+                end loop;
             exception
                 when others then
-                    l_err_msg := substr(                             -- [LOG:debug]
-                        'Stack: '     || dbms_utility.format_error_stack || chr(10)
-                        || 'Backtrace: ' || dbms_utility.format_error_backtrace,
-                        1, 4000);
-                    update plt_queue_writer
-                       set status        = 'FAILED',
-                           error_message = l_err_msg,
-                           retry_count   = retry_count + 1,
-                           updated_at    = systimestamp
-                     where id = r.id;
+                    -- batch POST failed: fall back to per-item so individual
+                    -- failures are marked (one bad metric won't poison the batch)
+                    for i in 1..l_metric_count loop
+                        begin
+                            l_payload_clob := treat(l_metric_payloads.get(i - 1) as sys.json_object_t).to_clob();
+                            plt_otlp_bridge.process_payload('METRIC', l_payload_clob);
+                            update plt_queue_writer
+                               set status = 'PROCESSED', updated_at = systimestamp
+                             where id = l_metric_ids(i);
+                        exception
+                            when others then
+                                l_err_msg := substr(
+                                    'Stack: '     || dbms_utility.format_error_stack || chr(10)
+                                    || 'Backtrace: ' || dbms_utility.format_error_backtrace,
+                                    1, 4000);
+                                update plt_queue_writer
+                                   set status        = 'FAILED',
+                                       error_message = l_err_msg,
+                                       retry_count   = retry_count + 1,
+                                       updated_at    = systimestamp
+                                 where id = l_metric_ids(i);
+                        end;
+                    end loop;
             end;
-        end loop;
+        end if;
+
         commit;
     exception
         when others then
@@ -624,7 +675,7 @@ create or replace package body pltelemetry as
         select pulse_mode, last_heartbeat
           into l_mode, l_last_beat                                   -- [LOG:debug]
           from plt_agent_registry
-         where agent_id = 'PRIMARY_AGENT'
+         where agent_id = 'PRIMARY'
          fetch first 1 rows only;
 
         if elapsed_ms(l_last_beat, systimestamp) / 1000 > l_threshold then
