@@ -83,7 +83,7 @@
       "pluginVersion": "10.0.0",
       "targets": [
         {
-          "expr": "plt_agent_info",
+          "expr": "woofy_info",
           "legendFormat": "{{version}}",
           "refId": "A"
         }
@@ -96,7 +96,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Tiempo que el agente lleva online (plt_agent_uptime_seconds).",
+      "description": "Tiempo que el agente lleva online (woofy_uptime_seconds).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -144,7 +144,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_uptime_seconds",
+          "expr": "woofy_uptime_seconds",
           "refId": "A"
         }
       ],
@@ -221,7 +221,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_circuit_breaker_open",
+          "expr": "woofy_circuit_breaker_open",
           "refId": "A"
         }
       ],
@@ -284,7 +284,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_queue_size",
+          "expr": "woofy_queue_size",
           "refId": "A"
         }
       ],
@@ -348,7 +348,7 @@
       },
       "targets": [
         {
-          "expr": "time() - plt_agent_last_success_timestamp_seconds",
+          "expr": "time() - woofy_last_success_timestamp_seconds",
           "refId": "A"
         }
       ],
@@ -439,7 +439,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_throttler_mode",
+          "expr": "woofy_throttling_mode",
           "refId": "A"
         }
       ],
@@ -543,12 +543,12 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_oracle_query_duration_seconds{quantile=\"0.50\"}",
+          "expr": "woofy_oracle_query_duration_seconds{quantile=\"0.50\"}",
           "legendFormat": "P50 (Median)",
           "refId": "A"
         },
         {
-          "expr": "plt_agent_oracle_query_duration_seconds{quantile=\"0.95\"}",
+          "expr": "woofy_oracle_query_duration_seconds{quantile=\"0.95\"}",
           "legendFormat": "P95 (Tail Latency)",
           "refId": "B"
         }
@@ -608,7 +608,7 @@
       },
       "targets": [
         {
-          "expr": "increase(plt_agent_oracle_errors_total[1m])",
+          "expr": "increase(woofy_oracle_errors_total[1m])",
           "legendFormat": "Errors/min",
           "refId": "A"
         }
@@ -678,7 +678,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_oracle_connections_active",
+          "expr": "woofy_oracle_connections_active",
           "refId": "A"
         }
       ],
@@ -781,7 +781,7 @@
       },
       "targets": [
         {
-          "expr": "rate(plt_agent_payloads_processed_total[$__rate_interval])",
+          "expr": "rate(woofy_payloads_processed_total[$__rate_interval])",
           "legendFormat": "{{type}}",
           "refId": "A"
         }
@@ -871,7 +871,7 @@
       },
       "targets": [
         {
-          "expr": "plt_agent_throttler_heat",
+          "expr": "woofy_throttling_heat",
           "legendFormat": "__auto",
           "refId": "A"
         }

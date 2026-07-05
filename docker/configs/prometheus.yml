@@ -17,11 +17,14 @@ scrape_configs:
     scrape_timeout: 8s     # Almost at the interval limit to ensure read
 
   # 2. Woofy Agent (Direct)
-  # Scrape directly to have reliable Runtime data (Go routines, GC)
+  # Scrape directly to have reliable Runtime data (Go routines, GC).
+  # Port 8085: :8080 is taken by another host app, woofy binds 0.0.0.0:8085
+  # (config.yaml healthPort). host.containers.internal routes to the host LAN
+  # IP, reachable because woofy binds all interfaces.
   - job_name: 'woofy-agent'
     static_configs:
       # host.docker.internal to reach your machine from Docker
-      - targets: ['host.containers.internal:8080'] 
+      - targets: ['host.containers.internal:8085']
     scrape_interval: 5s    # High frequency to catch CPU/Memory spikes
     scrape_timeout: 4s
     metrics_path: /metrics

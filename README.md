@@ -1,4 +1,3 @@
-````md
 # PLTelemetry — Oracle PL/SQL OpenTelemetry SDK
 
 Your database is already the **most critical service** in your system.  
@@ -34,7 +33,10 @@ PLTelemetry is built with a **Database-First mindset**: stability, performance, 
 ## ⚡ Asynchronous Architecture (“Fire-and-Forget”)
 
 - **Decoupled instrumentation**  
-  Telemetry is enqueued into a high-throughput staging table (`PLT_QUEUE`).  
+  Telemetry is enqueued into a high-throughput **partitioned staging queue**:
+  `plt_queue_writer` (synonym → active partition) writes into `plt_queue_01` /
+  `plt_queue_02`, swapped by `PLT_QUEUE_MAINTENANCE_JOB`. The agent and bridge
+  read from the `plt_queue_reader` view (UNION of both partitions).
   Calls to `start_span` or `log` complete in microseconds.
 
 - **Protected critical path**  
@@ -62,13 +64,13 @@ PLTelemetry is built with a **Database-First mindset**: stability, performance, 
 ### Hybrid Delivery Model
 
 - **Primary path**  
-  An external **Go Agent** (recommended) consumes data from `PLT_QUEUE` with maximum throughput.
+  An external **Go Agent** ([woofy-metrics](../woofy-metrics)) consumes data from the queue via OTLP **HTTP** (`POST /v1/{metrics,traces,logs}` on port `4318`) with maximum throughput.
 
 - **Failover path**  
-  If the agent becomes unavailable, the internal `PLT_FAILOVER_JOB` activates and delivers telemetry using `UTL_HTTP`.
+  If the agent becomes unavailable, the internal `PLT_FAILOVER_JOB` activates and delivers telemetry using `UTL_HTTP` via `PLT_OTLP_BRIDGE` (batched, 1 POST / 500 items).
 
 - **Self-healing behaviour**  
-  Agent heartbeats are continuously monitored and delivery mode switches automatically to prevent data loss.
+  The agent writes a heartbeat row to `plt_agent_registry` (`agent_id = 'PRIMARY'`) on every poll cycle. `PLT_HEALTH_MONITOR` checks it via `PLTelemetry.is_agent_healthy`, which treats a heartbeat older than **45 seconds** (≈3 missed beats at the default 15s cadence) as stale and enables `PLT_FAILOVER_JOB`. When the agent resumes heartbeats, the fallback is disabled automatically — preventing data loss without manual intervention.
 
 ---
 
@@ -105,21 +107,22 @@ PLTelemetry follows a strict **Store-and-Forward** pattern to minimise overhead 
 graph TD
     subgraph "Transaction Boundary (Microseconds)"
         APP[PL/SQL Application] -->|1. start_span / log| SDK[PLTelemetry API]
-        SDK -->|2. INSERT (Fast)| Q[PLT_QUEUE Table]
+        SDK -->|2. INSERT (Fast)| Q[plt_queue_writer → plt_queue_01/02]
     end
     
     subgraph "Background Processing"
-        Q -.->|3a. Bulk Fetch| AGENT[Go Agent (Preferred)]
+        Q -.->|3a. Bulk Fetch via plt_queue_reader| AGENT[Go Agent (Preferred)]
         Q -.->|3b. Failover Fetch| BRIDGE[PLT_OTLP_BRIDGE]
         JOB[PLT_FAILOVER_JOB] -->|Trigger| BRIDGE
     end
 
-    AGENT -->|4. OTLP gRPC/HTTP| COLLECTOR[OpenTelemetry Collector]
+    AGENT -->|4. OTLP HTTP| COLLECTOR[OpenTelemetry Collector]
     BRIDGE -->|4. OTLP HTTP| COLLECTOR
     
-    COLLECTOR --> JAEGER[Jaeger (Traces)]
+    COLLECTOR --> JAEGER[Jaeger / Tempo (Traces)]
     COLLECTOR --> PROM[Prometheus (Metrics)]
-````
+    COLLECTOR --> LOKI[Loki (Logs)]
+```
 
 ### Data Flow
 
@@ -127,13 +130,14 @@ graph TD
   Application code calls the PLTelemetry API.
 
 * **Ingestion**
-  Telemetry is persisted in `PLT_QUEUE`.
-  The insert is part of the business transaction: if the transaction rolls back, telemetry is discarded.
+  Telemetry is persisted in the queue via `plt_queue_writer` (the active
+  partition). The insert is part of the business transaction: if the
+  transaction rolls back, telemetry is discarded.
 
 * **Export**
 
-  * The Go Agent batches and exports records via OTLP gRPC (preferred).
-  * The PL/SQL bridge delivers data via HTTP if the agent is offline.
+  * The Go Agent exports records via **OTLP HTTP** (one POST per item to the collector's `/v1/{signal}` endpoints).
+  * The PL/SQL bridge delivers data via **HTTP** (`UTL_HTTP`) if the agent is offline.
 
 ---
 
@@ -141,7 +145,7 @@ graph TD
 
 ### Prerequisites
 
-* **Database**: Oracle Database 12c R2 or higher (19c / 21c / 23c recommended)
+* **Database**: Oracle Database 12c R2 or higher (19c / 21c / 23c / 23ai recommended; tested on 23ai Free)
 * **Privileges**:
   `CREATE TABLE`, `CREATE PROCEDURE`, `CREATE TYPE`, `CREATE JOB`
 * **Network access**:
@@ -149,9 +153,16 @@ graph TD
 * **Optional (SYSDBA)**:
   Required only to collect system-level metrics from `V$` views
 
----
+### Installer
 
-### Installation Steps
+An automated installer is provided:
+
+```bash
+python3 install.py            # uses install.yaml
+# or edit install_template.yaml and point install.py at it
+```
+
+### Manual Installation Steps
 
 #### 1. Create Types & Tables
 
@@ -175,10 +186,13 @@ graph TD
 #### 4. Deploy Packages
 
 * `PLTelemetry.pks / pkb` — Core SDK & public API
-* `PLT_CONFIGURATION.pks / pkb` — High-performance configuration manager
-* `PLT_OTLP_BRIDGE.pks / pkb` — Internal HTTP exporter
+* `PLT_CONFIGURATION.pks / pkb` — High-performance configuration manager (Oracle Result Cache)
+* `PLT_OTLP_BRIDGE.pks / pkb` — Internal HTTP exporter (failover path)
+* `PLT_ACTIVATION_MANAGER.pks / pkb` — Sampling / activation rules
+* `PLT_QUEUE_MANAGER.pks / pkb` — Queue lifecycle (partition swap, cleanup)
 * `PLT_DB_METRIC_READER.pks / pkb` — Metric extraction
 * `PLT_DB_MONITOR_LOGIC.pks / pkb` — Metric orchestration
+* `check_agent_health_proc.sql` — Agent-health check procedure
 
 #### 5. Enable Background Jobs
 
@@ -186,11 +200,18 @@ graph TD
 @04_jobs.sql
 ```
 
+#### 6. Queue Partitioning & Maintenance
+
+```sql
+@06_queue_config.sql
+@07_queue_maintenace_job.sql
+```
+
 ---
 
 ## ⚙️ Configuration
 
-Configuration is stored in `PLT_SYS_CONFIG` and served via **Oracle Result Cache**, ensuring near-zero overhead even under heavy load.
+Configuration is stored in `PLT_SYS_CONFIG` (columns `CONFIG_GROUP`, `CONFIG_KEY`, `CONFIG_VALUE`) and served via **Oracle Result Cache**, ensuring near-zero overhead even under heavy load. The result cache is invalidated automatically on commit.
 
 ### Connection Settings
 
@@ -213,15 +234,15 @@ END;
 
 ## ⚙️ Throttling & Sampling (Adaptive Load Control)
 
-Telemetry behaviour is controlled via pulse modes defined in `PLT_PULSE_THROTTLING_CONFIG`.
+Telemetry behaviour is controlled via pulse modes defined in `PLT_PULSE_THROTTLING_CONFIG` (per-tenant, `GLOBAL` by default). Each mode sets a capacity multiplier (agent processing capacity), a batch multiplier, a poll-interval multiplier, and a sampling rate.
 
-| Mode   | Behaviour          |
-| ------ | ------------------ |
-| PULSE1 | 100% sampling      |
-| PULSE2 | 75% sampling       |
-| PULSE3 | 50% sampling       |
-| PULSE4 | 10% sampling       |
-| COMA   | Telemetry disabled |
+| Mode   | Capacity | Sampling | Behaviour                |
+| ------ | -------- | -------- | ------------------------ |
+| PULSE1 | 100%     | 100%     | Full speed — no throttling |
+| PULSE2 | 50%      | 75%      | Moderate load             |
+| PULSE3 | 25%      | 50%      | High load                 |
+| PULSE4 | 10%      | 10%      | Critical load             |
+| COMA   | 0%       | 0%       | System overload — hibernation (telemetry disabled) |
 
 Modes can be switched dynamically without redeploying code.
 
@@ -229,7 +250,8 @@ Modes can be switched dynamically without redeploying code.
 
 ## 💻 Usage Examples
 
-### Distributed Tracing
+See `docs/PLTelemetry_examples.sql` and `docs/OTLP_Bridge_examples.sql` for
+more. A minimal distributed-tracing example:
 
 ```plsql
 PROCEDURE process_large_order(p_order_id NUMBER) IS
@@ -269,6 +291,25 @@ END;
 
 ---
 
+## 🧪 Tests & Utilities
+
+`src/utils/` contains diagnostic and benchmark tooling (run from sqlplus):
+
+| File | Purpose |
+|------|---------|
+| `PLT_SMOKE_TEST.sql` | End-to-end smoke test: logs/metrics/traces, attrs, severity levels, tenant isolation, W3C context, export via `process_queue`, collector reachable. |
+| `PLT_TPS_TEST.sql` | Throughput benchmark: per-signal TPS (LOG/METRIC/TRACE), OTLP/HTTP export TPS, concurrent scheduler-job TPS; reports min/max/avg + µs/op. |
+| `PLT_PERF_SUITE.pks / .pkb` + `plt_perf_suite_run.sql` | In-database performance suite. |
+| `PLT_DIAGNOSTIC.sql` | Health / configuration diagnostics. |
+| `PLT_ENABLE_TRACING.sql` | Enable / disable tracing. |
+
+For the runtime overhead analysis, see **[PERFORMANCE.md](PERFORMANCE.md)**.
+
+The Go-agent side (smoke + TPS tests, measured throughput) is documented in
+[woofy-metrics/README.md](../woofy-metrics/README.md).
+
+---
+
 ## 🔍 Monitoring & Troubleshooting
 
 * **Internal SDK errors**
@@ -279,16 +320,35 @@ FROM plt_telemetry_errors
 ORDER BY error_time DESC;
 ```
 
-* **Queue health**
+* **Queue health** (read through the view that UNIONs both partitions)
 
 ```sql
 SELECT status, COUNT(*)
-FROM plt_queue
+FROM plt_queue_reader
 GROUP BY status;
 ```
 
+* **Active partition / queue registry**
+
+```sql
+SELECT * FROM plt_queue_registry;
+```
+
 * **Failover status**
-  Inspect `PLT_AGENT_REGISTRY` to determine whether the system is operating in **PRIMARY** or **FAILOVER** mode.
+  Inspect `plt_agent_registry` to determine whether the system is operating in
+  **PRIMARY** (agent healthy) or **FAILOVER** (agent stale) mode:
+
+```sql
+SELECT agent_id, last_heartbeat, pulse_mode, status_message, items_processed
+FROM plt_agent_registry
+WHERE agent_id = 'PRIMARY';
+
+SELECT PLTelemetry.is_agent_healthy AS agent_healthy FROM dual;
+
+SELECT job_name, enabled, state, last_start_date, next_run_date
+FROM user_scheduler_jobs
+WHERE job_name IN ('PLT_HEALTH_MONITOR', 'PLT_FAILOVER_JOB');
+```
 
 ---
 
@@ -307,7 +367,9 @@ It is **not** designed for:
 
 ## 🤝 Contributing
 
-Contributions are welcome: performance optimisations, new metric collectors, documentation improvements, or architectural discussions.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are welcome: performance
+optimisations, new metric collectors, documentation improvements, or
+architectural discussions.
 
 Open an Issue or submit a Pull Request.
 
@@ -316,5 +378,3 @@ Open an Issue or submit a Pull Request.
 ## 📄 License
 
 MIT License
-
-```
