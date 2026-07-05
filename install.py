@@ -256,12 +256,40 @@ def run_sql_file(
 
         output = result.stdout + result.stderr
 
-        # Ignore benign "already exists" errors (idempotent re-runs)
-        benign_errors = {"ORA-27477", "ORA-01920", "ORA-06512"}
+        # Parse error indicators once
         import re
         ora_codes = set(re.findall(r'ORA-\d{5}', output))
         sp_errors = [l for l in output.splitlines() if "SP2-" in l]
         pls_errors = [l for l in output.splitlines() if "PLS-" in l]
+        benign_errors = {"ORA-27477", "ORA-01920", "ORA-06512", "ORA-00001"}
+
+        # Check return code first — sqlplus may fail to start entirely
+        # (e.g., missing shared libraries, binary not found)
+        if result.returncode != 0:
+            non_benign_ora = ora_codes - benign_errors
+
+            # If no ORA errors at all and returncode != 0, sqlplus failed to start
+            if not ora_codes and not sp_errors and not pls_errors:
+                print("FAILED — sqlplus did not execute successfully")
+                print("    --- sqlplus output ---")
+                for line in output.strip().splitlines():
+                    print(f"    | {line}")
+                print(f"    | (exit code: {result.returncode})")
+                print("    --- end output ---")
+                return False
+            elif non_benign_ora:
+                print("FAILED")
+                print("    --- sqlplus output ---")
+                for line in output.strip().splitlines():
+                    print(f"    | {line}")
+                print(f"    | (exit code: {result.returncode})")
+                print("    --- end output ---")
+                return False
+            else:
+                print("OK (with benign warnings)")
+                return True
+
+        # Ignore benign "already exists" errors (idempotent re-runs)
         real_errors = (ora_codes - benign_errors) or sp_errors or pls_errors
 
         if real_errors:

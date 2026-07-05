@@ -3,14 +3,17 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
     -- Dummy variable to ignore function returns if needed
     ignore_result VARCHAR2(100);
 
+    -- Session-scoped tenant for the current test run
+    g_tenant VARCHAR2(100) := 'default';
+
     -- =========================================================================
     -- INTERNAL HELPER TO LOG ATTRIBUTES
     -- =========================================================================
     PROCEDURE log_kv(p_key VARCHAR2, p_val VARCHAR2) IS
     BEGIN
-        -- ONE-LINE API: inline JSON attribute, no associative array needed
         PLTelemetry.log('INFO', 'Attribute Log',
-                        p_attrs_json => '{"' || p_key || '":"' || p_val || '"}');
+                        p_attrs_json => '{"' || p_key || '":"' || p_val || '"}',
+                        p_tenant_id => g_tenant);
     END;
 
     -- =========================================================================
@@ -20,28 +23,26 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
     -- SCENARIO 1: LIGHT (Pure metrics and short logs)
     PROCEDURE scen_light IS
     BEGIN
-        PLTelemetry.log_metric('perf.test.counter', 1, 'COUNTER');
-        PLTelemetry.log('INFO', 'Keep alive signal');
+        PLTelemetry.log_metric('perf.test.counter', 1, p_type => 'COUNTER', p_tenant_id => g_tenant);
+        PLTelemetry.log('INFO', 'Keep alive signal', p_tenant_id => g_tenant);
     END;
 
     -- SCENARIO 2: STANDARD (Order Simulation)
     PROCEDURE scen_standard IS
         l_span_id VARCHAR2(64);
     BEGIN
-        l_span_id := PLTelemetry.start_span('process_order');
+        l_span_id := PLTelemetry.start_span('process_order', p_tenant => g_tenant);
         
         log_kv('order.id', TO_CHAR(TRUNC(DBMS_RANDOM.VALUE(1000,9999))));
         log_kv('client.region', 'EU-WEST');
         
-        -- Child span 1
         ignore_result := PLTelemetry.start_span('validate_stock');
         PLTelemetry.end_span('OK');
 
-        -- Child span 2
         ignore_result := PLTelemetry.start_span('charge_credit_card');
         PLTelemetry.end_span('OK');
 
-        PLTelemetry.log('INFO', 'Order processed successfully');
+        PLTelemetry.log('INFO', 'Order processed successfully', p_tenant_id => g_tenant);
         PLTelemetry.end_span('OK');
     END;
 
@@ -50,13 +51,13 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
         l_big_text VARCHAR2(4000) := RPAD('LOREM IPSUM ', 2000, 'A');
         l_span_id  VARCHAR2(64);
     BEGIN
-        l_span_id := PLTelemetry.start_span('batch_process_heavy');
+        l_span_id := PLTelemetry.start_span('batch_process_heavy', p_tenant => g_tenant);
         
         log_kv('payload.dump', l_big_text);
         
         BEGIN
             l_span_id := PLTelemetry.start_span('risky_operation');
-            PLTelemetry.log('WARN', 'Memory usage high');
+            PLTelemetry.log('WARN', 'Memory usage high', p_tenant_id => g_tenant);
             
             IF DBMS_RANDOM.VALUE > 0.5 THEN
                 RAISE_APPLICATION_ERROR(-20001, 'Simulated Chaos Failure');
@@ -65,7 +66,8 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
             PLTelemetry.end_span('OK');
         EXCEPTION WHEN OTHERS THEN
             PLTelemetry.log('ERROR', 'Sub-task failed: ' || 
-                 SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK, 1, 200));
+                 SUBSTR(DBMS_UTILITY.FORMAT_ERROR_STACK, 1, 200),
+                 p_tenant_id => g_tenant);
             PLTelemetry.end_span('ERROR', 'Simulated Failure');
         END;
 
@@ -77,32 +79,26 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
         l_root    VARCHAR2(64);
         l_batch   VARCHAR2(64);
         l_item    VARCHAR2(64);
-        -- Simulate a JSON payload that borders VARCHAR2 limits
         l_payload VARCHAR2(32000) := RPAD('{"data":"', 4000, 'X') || '"}';
     BEGIN
-        -- Level 0: Overall Process
-        l_root := PLTelemetry.start_span('etl_nightly_job');
+        l_root := PLTelemetry.start_span('etl_nightly_job', p_tenant => g_tenant);
         log_kv('job.id', 'ETL-999');
 
-        -- Simulate batch processing
-        FOR i IN 1..3 LOOP -- 3 Batches
-            -- Level 1: Batch
+        FOR i IN 1..3 LOOP
             l_batch := PLTelemetry.start_span('process_batch_' || i);
             log_kv('batch.size', '500');
 
-            -- Level 2: Items within the batch (simulate a fast loop)
             FOR j IN 1..5 LOOP 
                 l_item := PLTelemetry.start_span('transform_row');
-                -- Inject lots of text to test serialization
                 log_kv('row.data', substr(l_payload, 1, 1000)); 
                 PLTelemetry.end_span('OK');
             END LOOP;
 
-            PLTelemetry.log('INFO', 'Batch '||i||' finished');
-            PLTelemetry.end_span('OK'); -- End Batch
+            PLTelemetry.log('INFO', 'Batch '||i||' finished', p_tenant_id => g_tenant);
+            PLTelemetry.end_span('OK');
         END LOOP;
 
-        PLTelemetry.end_span('OK'); -- End Root
+        PLTelemetry.end_span('OK');
     END;
 
     -- =========================================================================
@@ -117,8 +113,8 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
         l_elapsed  NUMBER;
         l_ops      NUMBER;
     BEGIN
-        -- Force unique test tenant for each scenario
-        PLTelemetry.set_tenant('PERF_' || p_scenario);
+        g_tenant := 'PERF_' || p_scenario;
+        PLTelemetry.reset_context;
 
         FOR i IN 1..p_iterations LOOP
             CASE p_scenario
@@ -169,7 +165,6 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
         l_job_name VARCHAR2(100);
         l_plsql    VARCHAR2(4000);
     BEGIN
-        -- Clean up previous jobs
         FOR j IN (SELECT job_name FROM user_scheduler_jobs WHERE job_name LIKE 'PLT_PERF_%') LOOP
             BEGIN DBMS_SCHEDULER.DROP_JOB(j.job_name, force => TRUE); EXCEPTION WHEN OTHERS THEN NULL; END;
         END LOOP;
@@ -189,34 +184,27 @@ CREATE OR REPLACE PACKAGE BODY PLT_PERF_SUITE AS
             );
         END LOOP;
         
-        DBMS_OUTPUT.PUT_LINE('🚀 Launched ' || p_concurrent_users || ' concurrent users (Scenario: '||p_scenario||').');
+        DBMS_OUTPUT.PUT_LINE('Launched ' || p_concurrent_users || ' concurrent users (Scenario: '||p_scenario||').');
     END spawn_load_test;
 
     -- =========================================================================
-    -- RESET QUEUE (ADAPTED TO NEW 01/02 TOPOLOGY)
+    -- RESET QUEUE
     -- =========================================================================
     PROCEDURE reset_queue IS
     BEGIN
-        -- 1. Deep cleanup of physical tables
-        -- Use Dynamic SQL in case the tables don't exist (though they should)
         BEGIN EXECUTE IMMEDIATE 'TRUNCATE TABLE plt_queue_01'; EXCEPTION WHEN OTHERS THEN NULL; END;
         BEGIN EXECUTE IMMEDIATE 'TRUNCATE TABLE plt_queue_02'; EXCEPTION WHEN OTHERS THEN NULL; END;
 
-        -- 2. Reset the Registry (Brain)
-        -- Return to Factory Default state: 01 Active, 02 Ready.
         DELETE FROM plt_queue_registry;
         INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_01', 'Y', 'ACTIVE');
         INSERT INTO plt_queue_registry (partition_name, is_active, state) VALUES ('PLT_QUEUE_02', 'N', 'READY');
 
-        -- 3. Reset the Pointer (Synonym)
-        -- Ensure PLTelemetry points to 01
         EXECUTE IMMEDIATE 'CREATE OR REPLACE SYNONYM plt_queue_writer FOR plt_queue_01';
 
-        -- 4. Clean up previous test results
         DELETE FROM plt_telemetry_errors WHERE module_name LIKE 'PERF_%';
         
         COMMIT;
-        DBMS_OUTPUT.PUT_LINE('🗑️ Queue topology reset (01 and 02 truncated, Registry restarted).');
+        DBMS_OUTPUT.PUT_LINE('Queue topology reset (01 and 02 truncated, Registry restarted).');
     END reset_queue;
 
 END PLT_PERF_SUITE;

@@ -29,7 +29,8 @@ BEGIN
     host => '*', -- In prod, restrict this to the Collector's IP
     ace  => xs$ace_type(
         privilege_list => xs$name_list('connect', 'resolve'),
-        principal_name => 'PLTELEMETRY'
+        principal_name => 'PLTELEMETRY',
+        principal_type => xs_acl.ptype_db
     )
   );
 END;

@@ -36,6 +36,7 @@ pltelemetry-bundle*.*
 
 # Test outputs
 test-results/
+test_results/
 *.test.log
 
 # Credentials (never commit these!)

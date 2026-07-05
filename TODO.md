@@ -9,7 +9,7 @@
 - [ ] **Simplify the PL/SQL telemetry API to 1 line** — trace, log, and metric should ideally be emitted with a single call/procedure each.
 - [ ] **Auto health-check of the PLTelemetry schema** — internal metrics to monitor the schema itself: tablespace usage, degradation in `plt_queue`, and other health conditions. Implement in the CORE of the DB metrics package or as a lighter version of it.
 - [ ] **Refactor and simplify the code** — reduce complexity without losing functionality whenever possible.
-- [ ] **Migrate from Docker to Podman** — adapt the `docker-compose.yml` and configurations to work with Podman instead of Docker.
+
 ## In Progress
 
 - [ ] **Bulletproof installation script** — create a YAML/CFG template where the user enters the necessary data (schemas, tablespaces, endpoints, etc.) and a script that reads that file to perform an unattended installation of PLTelemetry.
@@ -19,4 +19,4 @@
 
 ## Completed
 
-- [x] *(move here when finished)*
+- [x] **Migrate from Docker to Podman** — the observability stack now runs with `podman-compose.yml` (see `docker/README-PODMAN.md`); `docker-compose.yml` was removed.

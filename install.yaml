@@ -4,14 +4,14 @@
 
 connection:
   schema: "PLTELEMETRY"
-  schema_password: "oracle"
+  schema_password: "plt"
   sys_password: "oracle"
   host: "localhost"
   port: 1521
   service_name: "FREEPDB1"
 
 otlp:
-  endpoint_url: "http://otel-collector:4318"
+  endpoint_url: "http://192.168.100.135:4318"
   service_name: "oracle-db-prod"
   environment: "production"
   timeout_ms: 5000
