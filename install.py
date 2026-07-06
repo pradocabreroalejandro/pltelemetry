@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -717,6 +718,39 @@ GRANT EXECUTE ON UTL_HTTP TO {schema_upper};
     if install_failed > 0:
         print(f"\nInstallation failed with {install_failed} error(s).")
         failed += install_failed
+
+    # =======================================================================
+    # PRE-TEST: Enable tracing + stop scheduler jobs + clear queues
+    # =======================================================================
+    if not args.no_tests and not args.dry_run and failed == 0:
+        print("\n" + "=" * 60)
+        print("  PRE-TEST: Enabling tracing & preparing clean state")
+        print("=" * 60)
+        prep_sql = textwrap.dedent("""\
+            UPDATE plt_activation_rules SET is_enabled='Y', sample_rate=1 WHERE object_pattern='*';
+            COMMIT;
+            BEGIN
+              FOR j IN (SELECT job_name FROM user_scheduler_jobs) LOOP
+                DBMS_SCHEDULER.DISABLE(j.job_name, force=>TRUE);
+                DBMS_SCHEDULER.STOP_JOB(j.job_name, force=>TRUE);
+              END LOOP;
+            END;
+            /
+            TRUNCATE TABLE plt_queue_01;
+            TRUNCATE TABLE plt_queue_02;
+            BEGIN PLT_ACTIVATION_MANAGER.flush_cache; END;
+            /
+        """)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sql", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(prep_sql)
+            tmp_path = tmp.name
+        ok = run_sql_file(Path(tmp_path), schema_conn, "Enable tracing & clean queues")
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        if not ok:
+            print("  WARNING: Pre-test setup failed, tests may fail.")
 
     # =======================================================================
     # PHASE 2: TESTS (smoke test + TPS benchmark)
