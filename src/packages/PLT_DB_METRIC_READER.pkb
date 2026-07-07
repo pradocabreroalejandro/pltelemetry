@@ -24,19 +24,19 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         ) LOOP
             CASE r.stat_name
                 WHEN 'LOAD' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_load_average', r.value, 'GAUGE', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_load_average', r.value, 'GAUGE', NULL, '1'));
                 WHEN 'NUM_CPUS' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpus', r.value, 'GAUGE', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpus', r.value, 'GAUGE', NULL, '1'));
                 WHEN 'NUM_CPU_CORES' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpu_cores', r.value, 'GAUGE', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpu_cores', r.value, 'GAUGE', NULL, '1'));
                 WHEN 'NUM_CPU_SOCKETS' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpu_sockets', r.value, 'GAUGE', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_num_cpu_sockets', r.value, 'GAUGE', NULL, '1'));
                 WHEN 'PHYSICAL_MEMORY_BYTES' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_physical_memory_bytes', r.value, 'GAUGE', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_physical_memory_bytes', r.value, 'GAUGE', NULL, 'By'));
                 WHEN 'BUSY_TIME' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_cpu_busy_time_seconds', ROUND(r.value/100, 2), 'COUNTER', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_cpu_busy_time_seconds', ROUND(r.value/100, 2), 'COUNTER', NULL, 's'));
                 WHEN 'IDLE_TIME' THEN
-                    PIPE ROW(t_plt_metric_row('oracle_os_cpu_idle_time_seconds', ROUND(r.value/100, 2), 'COUNTER', NULL));
+                    PIPE ROW(t_plt_metric_row('oracle_os_cpu_idle_time_seconds', ROUND(r.value/100, 2), 'COUNTER', NULL, 's'));
             END CASE;
         END LOOP;
 
@@ -99,9 +99,19 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             -- Map to standardized names (Snake Case)
             PIPE ROW(t_plt_metric_row(
                 'oracle_' || REPLACE(REPLACE(REPLACE(LOWER(r.name), ' ', '_'), '*', ''), '(', ''),
-                r.value, 
-                'COUNTER', 
-                NULL
+                r.value,
+                'COUNTER',
+                NULL,
+                CASE r.name
+                    WHEN 'redo size'                               THEN 'By'
+                    WHEN 'bytes sent via SQL*Net to client'         THEN 'By'
+                    WHEN 'bytes received via SQL*Net from client'  THEN 'By'
+                    WHEN 'DB time'                                THEN 'cs'
+                    WHEN 'CPU used by this session'               THEN 'cs'
+                    WHEN 'DB CPU'                                 THEN 'cs'
+                    WHEN 'background cpu time'                    THEN 'cs'
+                    ELSE '1'
+                END
             ));
         END LOOP;
         
@@ -121,7 +131,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             
             IF l_logical_reads > 0 THEN
                 l_hit_ratio := ROUND((1 - (l_physical_reads / l_logical_reads)) * 100, 2);
-                PIPE ROW(t_plt_metric_row('oracle_buffer_cache_hit_ratio', l_hit_ratio, 'GAUGE', NULL));
+                PIPE ROW(t_plt_metric_row('oracle_buffer_cache_hit_ratio', l_hit_ratio, 'GAUGE', NULL, '%'));
             END IF;
         END;
         
@@ -134,7 +144,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             FROM v$librarycache;
             
             IF l_lib_hit_ratio IS NOT NULL THEN
-                PIPE ROW(t_plt_metric_row('oracle_library_cache_hit_ratio', l_lib_hit_ratio, 'GAUGE', NULL));
+                PIPE ROW(t_plt_metric_row('oracle_library_cache_hit_ratio', l_lib_hit_ratio, 'GAUGE', NULL, '%'));
             END IF;
         END;
         
@@ -148,7 +158,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             WHERE gets > 0;
             
             IF l_dict_hit_ratio IS NOT NULL THEN
-                PIPE ROW(t_plt_metric_row('oracle_dictionary_cache_hit_ratio', l_dict_hit_ratio, 'GAUGE', NULL));
+                PIPE ROW(t_plt_metric_row('oracle_dictionary_cache_hit_ratio', l_dict_hit_ratio, 'GAUGE', NULL, '%'));
             END IF;
         END;
 
@@ -164,13 +174,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_wait_class_' || LOWER(r.wait_class) || '_waits',
                 r.total_waits,
                 'COUNTER',
-                tag('wait_class', r.wait_class)
+                tag('wait_class', r.wait_class),
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_wait_class_' || LOWER(r.wait_class) || '_time_ms',
-                r.time_waited,
+                r.time_waited * 10,  -- v$system_wait_class.time_waited is in centiseconds → *10 for ms
                 'COUNTER',
-                tag('wait_class', r.wait_class)
+                tag('wait_class', r.wait_class),
+                'ms'
             ));
         END LOOP;
 
@@ -188,7 +200,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             WHERE name IN ('redo log space requests', 'redo size');
             
             IF l_eff IS NOT NULL THEN
-                PIPE ROW(t_plt_metric_row('oracle_redo_allocation_efficiency', GREATEST(0, l_eff), 'GAUGE', NULL));
+                PIPE ROW(t_plt_metric_row('oracle_redo_allocation_efficiency', GREATEST(0, l_eff), 'GAUGE', NULL, '%'));
             END IF;
         END;
 
@@ -202,7 +214,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             FROM v$sysstat;
             
             IF l_soft_parse_ratio IS NOT NULL THEN
-                PIPE ROW(t_plt_metric_row('oracle_soft_parse_ratio', GREATEST(0, l_soft_parse_ratio), 'GAUGE', NULL));
+                PIPE ROW(t_plt_metric_row('oracle_soft_parse_ratio', GREATEST(0, l_soft_parse_ratio), 'GAUGE', NULL, '%'));
             END IF;
         END;
 
@@ -219,27 +231,27 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
     BEGIN
         -- Active Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE type='USER' AND status='ACTIVE') LOOP
-            PIPE ROW(t_plt_metric_row('oracle_sessions_active', r.cnt, 'GAUGE', NULL));
+            PIPE ROW(t_plt_metric_row('oracle_sessions_active', r.cnt, 'GAUGE', NULL, '1'));
         END LOOP;
 
         -- Inactive Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE type='USER' AND status='INACTIVE') LOOP
-            PIPE ROW(t_plt_metric_row('oracle_sessions_inactive', r.cnt, 'GAUGE', NULL));
+            PIPE ROW(t_plt_metric_row('oracle_sessions_inactive', r.cnt, 'GAUGE', NULL, '1'));
         END LOOP;
 
         -- Total User Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE type='USER') LOOP
-            PIPE ROW(t_plt_metric_row('oracle_sessions_total', r.cnt, 'GAUGE', NULL));
+            PIPE ROW(t_plt_metric_row('oracle_sessions_total', r.cnt, 'GAUGE', NULL, '1'));
         END LOOP;
 
         -- Blocked Sessions
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE blocking_session IS NOT NULL) LOOP
-            PIPE ROW(t_plt_metric_row('oracle_sessions_blocked', r.cnt, 'GAUGE', NULL));
+            PIPE ROW(t_plt_metric_row('oracle_sessions_blocked', r.cnt, 'GAUGE', NULL, '1'));
         END LOOP;
 
         -- Sessions Waiting (non-Idle)
         FOR r IN (SELECT count(*) cnt FROM v$session WHERE state='WAITING' AND wait_class != 'Idle') LOOP
-            PIPE ROW(t_plt_metric_row('oracle_sessions_waiting', r.cnt, 'GAUGE', NULL));
+            PIPE ROW(t_plt_metric_row('oracle_sessions_waiting', r.cnt, 'GAUGE', NULL, '1'));
         END LOOP;
 
         -- 23ai: Pluggable Database Sessions
@@ -250,10 +262,11 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             GROUP BY con_id
         ) LOOP
             PIPE ROW(t_plt_metric_row(
-                'oracle_pdb_sessions', 
-                r.cnt, 
-                'GAUGE', 
-                tag('con_id', TO_CHAR(r.con_id))
+                'oracle_pdb_sessions',
+                r.cnt,
+                'GAUGE',
+                tag('con_id', TO_CHAR(r.con_id)),
+                '1'
             ));
         END LOOP;
 
@@ -265,10 +278,11 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
         ) LOOP
             IF r.limit_value != 'UNLIMITED' AND r.limit_value > 0 THEN
                 PIPE ROW(t_plt_metric_row(
-                    'oracle_resource_utilization_percent', 
-                    ROUND((r.current_utilization / TO_NUMBER(r.limit_value)) * 100, 2), 
-                    'GAUGE', 
-                    tag('resource', r.resource_name)
+                    'oracle_resource_utilization_percent',
+                    ROUND((r.current_utilization / TO_NUMBER(r.limit_value)) * 100, 2),
+                    'GAUGE',
+                    tag('resource', r.resource_name),
+                    '%'
                 ));
             END IF;
         END LOOP;
@@ -288,7 +302,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_top_sql_cpu_time',
                 r.cpu_time,
                 'GAUGE',
-                tag('sql_id', r.sql_id)
+                tag('sql_id', r.sql_id),
+                'us'  -- v$sql.cpu_time is in microseconds
             ));
         END LOOP;
 
@@ -312,22 +327,25 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
             FROM dba_tablespace_usage_metrics
         ) LOOP
             PIPE ROW(t_plt_metric_row(
-                'oracle_tablespace_usage_percent', 
-                r.used_pct, 
-                'GAUGE', 
-                tag('tablespace', r.tablespace_name)
+                'oracle_tablespace_usage_percent',
+                r.used_pct,
+                'GAUGE',
+                tag('tablespace', r.tablespace_name),
+                '%'
             ));
             PIPE ROW(t_plt_metric_row(
-                'oracle_tablespace_size_bytes', 
-                r.total_bytes, 
-                'GAUGE', 
-                tag('tablespace', r.tablespace_name)
+                'oracle_tablespace_size_bytes',
+                r.total_bytes,
+                'GAUGE',
+                tag('tablespace', r.tablespace_name),
+                'By'
             ));
             PIPE ROW(t_plt_metric_row(
-                'oracle_tablespace_used_bytes', 
-                r.used_bytes, 
-                'GAUGE', 
-                tag('tablespace', r.tablespace_name)
+                'oracle_tablespace_used_bytes',
+                r.used_bytes,
+                'GAUGE',
+                tag('tablespace', r.tablespace_name),
+                'By'
             ));
         END LOOP;
 
@@ -341,13 +359,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_datafile_physical_writes',
                 r.phywrts,
                 'COUNTER',
-                tag('tablespace', r.tablespace_name) || ',"file":"' || r.file_name || '"'
+                tag('tablespace', r.tablespace_name) || ',"file":"' || r.file_name || '"',
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_datafile_write_time_ms',
                 r.writetim * 10,
                 'COUNTER',
-                tag('tablespace', r.tablespace_name) || ',"file":"' || r.file_name || '"'
+                tag('tablespace', r.tablespace_name) || ',"file":"' || r.file_name || '"',
+                'ms'
             ));
         END LOOP;
 
@@ -365,13 +385,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_rman_backup_status',
                 r.last_backup_ok,
                 'GAUGE',
-                NULL
+                NULL,
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_rman_backup_count',
                 r.total_backups,
                 'COUNTER',
-                NULL
+                NULL,
+                '1'
             ));
         END LOOP;
 
@@ -388,7 +410,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                     'oracle_undo_usage_percent',
                     r.undo_used_pct,
                     'GAUGE',
-                    NULL
+                    NULL,
+                    '%'
                 ));
             END IF;
         END LOOP;
@@ -403,7 +426,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                     'oracle_temp_usage_percent',
                     ROUND((r.bytes_used / (r.bytes_used + r.bytes_free)) * 100, 2),
                     'GAUGE',
-                    tag('tablespace', r.tablespace_name)
+                    tag('tablespace', r.tablespace_name),
+                    '%'
                 ));
             END IF;
         END LOOP;
@@ -440,7 +464,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                     'oracle_auto_index_actions',
                     l_acts(i).cnt,
                     'COUNTER',
-                    tag('action_type', l_acts(i).action_type) || ',"status":"' || l_acts(i).status || '"'
+                    tag('action_type', l_acts(i).action_type) || ',"status":"' || l_acts(i).status || '"',
+                    '1'
                 ));
             END LOOP;
         END IF;
@@ -456,7 +481,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_auto_index_implemented_count',
                 l_cnt,
                 'GAUGE',
-                NULL
+                NULL,
+                '1'
             ));
         END IF;
 
@@ -486,19 +512,22 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tns_service_sessions_total',
                 r.cnt,
                 'GAUGE',
-                tag('service', r.service_name)
+                tag('service', r.service_name),
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_tns_service_sessions_active',
                 r.active,
                 'GAUGE',
-                tag('service', r.service_name)
+                tag('service', r.service_name),
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_tns_service_sessions_inactive',
                 r.inactive,
                 'GAUGE',
-                tag('service', r.service_name)
+                tag('service', r.service_name),
+                '1'
             ));
         END LOOP;
 
@@ -739,13 +768,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tns_wait_event_waits',
                 r.total_waits,
                 'COUNTER',
-                tag('event', r.event)
+                tag('event', r.event),
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_tns_wait_event_time_ms',
                 r.time_waited_ms,
                 'COUNTER',
-                tag('event', r.event)
+                tag('event', r.event),
+                'ms'
             ));
         END LOOP;
 
@@ -760,7 +791,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tns_' || REPLACE(LOWER(r.name), ' ', '_'),
                 r.value,
                 CASE WHEN r.name = 'logons current' THEN 'GAUGE' ELSE 'COUNTER' END,
-                NULL
+                NULL,
+                '1'
             ));
         END LOOP;
 
@@ -779,7 +811,12 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tns_' || REPLACE(REPLACE(LOWER(r.name), ' ', '_'), '*/', ''),
                 r.value,
                 'COUNTER',
-                NULL
+                NULL,
+                CASE r.name
+                    WHEN 'bytes sent via SQL*Net to client'       THEN 'By'
+                    WHEN 'bytes received via SQL*Net from client' THEN 'By'
+                    ELSE '1'
+                END
             ));
         END LOOP;
 
@@ -794,25 +831,29 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_dispatcher_messages',
                 r.messages,
                 'COUNTER',
-                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"'
+                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"',
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_dispatcher_bytes',
                 r.bytes,
                 'COUNTER',
-                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"'
+                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"',
+                'By'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_dispatcher_idle_time',
                 r.idle,
                 'COUNTER',
-                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"'
+                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"',
+                'cs'  -- v$dispatcher.idle is in centiseconds
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_dispatcher_busy_time',
                 r.busy,
                 'COUNTER',
-                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"'
+                tag('name', r.name) || ',"network":"' || r.network || '","status":"' || r.status || '"',
+                'cs'  -- v$dispatcher.busy is in centiseconds
             ));
         END LOOP;
 
@@ -827,7 +868,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_tns_logons_cumulative',
                 l_logons,
                 'COUNTER',
-                NULL
+                NULL,
+                '1'
             ));
         END;
 
@@ -843,13 +885,15 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                 'oracle_listener_queue_items',
                 r.queued,
                 'GAUGE',
-                tag('type', r.type)
+                tag('type', r.type),
+                '1'
             ));
             PIPE ROW(t_plt_metric_row(
                 'oracle_listener_queue_wait',
                 r.wait,
                 'GAUGE',
-                tag('type', r.type)
+                tag('type', r.type),
+                's'  -- v$queue.wait is in seconds
             ));
         END LOOP;
 
@@ -875,7 +919,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                     'oracle_inmemory_population_percent',
                     ROUND((1 - (r.bytes_not_populated / r.bytes)) * 100, 2),
                     'GAUGE',
-                    tag('segment', r.segment_name) || ',"owner",' || r.owner || '"'
+                    tag('segment', r.segment_name) || ',"owner",' || r.owner || '"',
+                    '%'
                 ));
             END IF;
         END LOOP;
@@ -892,7 +937,8 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_METRIC_READER AS
                     'oracle_inmemory_scan_efficiency_percent',
                     ROUND((r.optimized_rows / r.total_rows) * 100, 2),
                     'GAUGE',
-                    NULL
+                    NULL,
+                    '%'
                 ));
             END IF;
         END LOOP;

@@ -27,11 +27,14 @@ CREATE OR REPLACE TYPE plt_pulse_config_t AS OBJECT (
 /
 
 -- 2. METRIC ROW (Used in Pipelined Functions)
+-- NOTE: SQL object types do NOT support DEFAULT on attributes; the '1' (dimensionless)
+-- default is applied at the PL/SQL layer (PIPE ROW construction) instead.
 CREATE OR REPLACE TYPE t_plt_metric_row AS OBJECT (
     metric_name   VARCHAR2(255),
     metric_value  NUMBER,
     metric_type   VARCHAR2(20),  -- 'GAUGE' or 'COUNTER'
-    tags_json     VARCHAR2(4000) -- Additional tags: '{"tablespace":"USERS"}'
+    tags_json     VARCHAR2(4000), -- Additional tags: '{"tablespace":"USERS"}'
+    metric_unit   VARCHAR2(50)   -- OTLP unit: '1'=count, 'By'=bytes, 's'=seconds, 'ms'=ms, '%'=percent, 'cs'=centiseconds, 'us'=microseconds
 );
 /
 

@@ -2,29 +2,62 @@
 # PROMETHEUS CONFIGURATION - TUNED FOR STABILITY
 # =============================================================================
 global:
-  scrape_interval: 15s     # Default interval
-  evaluation_interval: 15s 
-  scrape_timeout: 10s      # 🔥 Important: Give time if the endpoint is slow
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
 
 scrape_configs:
   # 1. OTEL Collector
-  # This endpoint can become VERY heavy because it exposes metrics from
-  # the entire pipeline + metrics converted from traces.
   - job_name: 'otel-collector'
     static_configs:
       - targets: ['otel-collector:8889']
     scrape_interval: 10s
-    scrape_timeout: 8s     # Almost at the interval limit to ensure read
+    scrape_timeout: 8s
 
   # 2. Woofy Agent (Direct)
-  # Scrape directly to have reliable Runtime data (Go routines, GC).
-  # Port 8085: :8080 is taken by another host app, woofy binds 0.0.0.0:8085
-  # (config.yaml healthPort). host.containers.internal routes to the host LAN
-  # IP, reachable because woofy binds all interfaces.
   - job_name: 'woofy-agent'
     static_configs:
-      # host.docker.internal to reach your machine from Docker
-      - targets: ['host.containers.internal:8085']
-    scrape_interval: 5s    # High frequency to catch CPU/Memory spikes
+      - targets: ['host.docker.internal:8085']
+    scrape_interval: 5s
     scrape_timeout: 4s
     metrics_path: /metrics
+
+  # 3. Queue Health Plugin
+  - job_name: 'queue-health'
+    static_configs:
+      - targets: ['host.docker.internal:9201']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    authorization:
+      credentials: 'woofy-queue-token-2026'
+
+  # 4. Failover Health Plugin
+  - job_name: 'failover-health'
+    static_configs:
+      - targets: ['host.docker.internal:9202']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    authorization:
+      credentials: 'woofy-failover-token-2026'
+
+  # 5. OTLP Probe Plugin
+  - job_name: 'otlp-probe'
+    static_configs:
+      - targets: ['host.docker.internal:9203']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    authorization:
+      credentials: 'woofy-otlp-probe-token-2026'
+
+  # 6. TNS Listener Health Plugin
+  - job_name: 'tns-listener-health'
+    static_configs:
+      - targets: ['host.docker.internal:9200']
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metrics_path: /metrics
+    authorization:
+      credentials: 'woofy-tns-token-2026'

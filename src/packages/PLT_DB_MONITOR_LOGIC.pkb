@@ -35,6 +35,7 @@ CREATE OR REPLACE PACKAGE BODY PLTELEMETRY.PLT_DB_MONITOR_LOGIC AS
                 p_name      => p_dataset(i).metric_name,
                 p_value     => p_dataset(i).metric_value,
                 p_type      => p_dataset(i).metric_type,
+                p_unit      => p_dataset(i).metric_unit,
                 p_attrs     => l_attrs,
                 p_tenant_id => p_tenant_id
             );

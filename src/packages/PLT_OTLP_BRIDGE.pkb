@@ -177,6 +177,7 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_name      VARCHAR2(255) := p_src.get_string('name');
         l_val       NUMBER := p_src.get_number('value');
         l_type      VARCHAR2(50) := NVL(p_src.get_string('type'), 'GAUGE');
+        l_unit      VARCHAR2(50) := NVL(p_src.get_string('unit'), '1');
         l_trace_id  VARCHAR2(32) := p_src.get_string('trace_id');
         l_span_id   VARCHAR2(16) := p_src.get_string('span_id');
 
@@ -219,6 +220,10 @@ CREATE OR REPLACE PACKAGE BODY PLT_OTLP_BRIDGE AS
         l_data.put('dataPoints', l_pts);
 
         l_m_obj.put('name', l_name);
+        -- OTLP 'unit' field: emit only when meaningful (skip '1' = dimensionless).
+        IF l_unit IS NOT NULL AND l_unit != '1' THEN
+            l_m_obj.put('unit', l_unit);
+        END IF;
         IF l_type = 'COUNTER' THEN
             l_data.put('isMonotonic', TRUE); l_data.put('aggregationTemporality', 2);
             l_m_obj.put('sum', l_data);
